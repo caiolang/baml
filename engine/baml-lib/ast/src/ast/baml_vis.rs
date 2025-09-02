@@ -157,21 +157,20 @@ impl<'a> GraphBuilder<'a> {
         for h in &self.index.headers {
             if let Some(pid) = &h.parent_id {
                 if let Some(&ph) = idstr_to_hid.get(pid.as_str()) {
-                    if let Some(parent) = self.by_hid.get(&ph) {
-                        if parent.scope == h.scope {
-                            self.md_children.entry(ph).or_default().push(h.hid);
-                            self.has_md_parent.insert(h.hid);
-                        }
+                    let parent = self.by_hid[&ph];
+                    if parent.scope == h.scope {
+                        self.md_children.entry(ph).or_default().push(h.hid);
+                        self.has_md_parent.insert(h.hid);
                     }
                 }
             }
         }
         for (p, c) in self.index.nested_edges_hid_iter() {
-            if let (Some(ph), Some(ch)) = (self.index.get_by_hid(*p), self.index.get_by_hid(*c)) {
-                if ph.scope != ch.scope {
-                    self.nested_children.entry(*p).or_default().push(*c);
-                    self.nested_targets.insert(*c);
-                }
+            let ph = self.by_hid[p];
+            let ch = self.by_hid[c];
+            if ph.scope != ch.scope {
+                self.nested_children.entry(*p).or_default().push(*c);
+                self.nested_targets.insert(*c);
             }
         }
     }
