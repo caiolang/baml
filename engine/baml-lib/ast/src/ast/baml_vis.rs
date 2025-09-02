@@ -112,7 +112,6 @@ struct GraphBuilder<'a> {
     next_node: u32,
     next_cluster: u32,
     by_hid: HashMap<Hid, &'a RenderableHeader>,
-    idstr_to_hid: HashMap<&'a str, Hid>,
     md_children: HashMap<Hid, Vec<Hid>>,
     has_md_parent: HashSet<Hid>,
     nested_children: HashMap<Hid, Vec<Hid>>,
@@ -134,7 +133,6 @@ impl<'a> GraphBuilder<'a> {
             next_node: 0,
             next_cluster: 0,
             by_hid: HashMap::new(),
-            idstr_to_hid: HashMap::new(),
             md_children: HashMap::new(),
             has_md_parent: HashSet::new(),
             nested_children: HashMap::new(),
@@ -150,14 +148,15 @@ impl<'a> GraphBuilder<'a> {
     }
 
     fn precompute(&mut self) {
+        let mut idstr_to_hid = HashMap::new();
         for h in &self.index.headers {
             self.by_hid.insert(h.hid, h);
-            self.idstr_to_hid.insert(&h.id, h.hid);
+            idstr_to_hid.insert(h.id.as_str(), h.hid);
             self.scope_root.entry(h.scope).or_insert(h.hid);
         }
         for h in &self.index.headers {
             if let Some(pid) = &h.parent_id {
-                if let Some(&ph) = self.idstr_to_hid.get(pid.as_str()) {
+                if let Some(&ph) = idstr_to_hid.get(pid.as_str()) {
                     if let Some(parent) = self.by_hid.get(&ph) {
                         if parent.scope == h.scope {
                             self.md_children.entry(ph).or_default().push(h.hid);
