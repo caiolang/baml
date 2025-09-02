@@ -115,7 +115,6 @@ struct GraphBuilder<'a> {
     md_children: HashMap<Hid, Vec<Hid>>,
     has_md_parent: HashSet<Hid>,
     nested_children: HashMap<Hid, Vec<Hid>>,
-    scope_root: HashMap<ScopeId, Hid>,
     nested_targets: HashSet<Hid>,
     header_entry: HashMap<Hid, String>,
     header_exits: HashMap<Hid, Vec<String>>,
@@ -136,7 +135,6 @@ impl<'a> GraphBuilder<'a> {
             md_children: HashMap::new(),
             has_md_parent: HashSet::new(),
             nested_children: HashMap::new(),
-            scope_root: HashMap::new(),
             nested_targets: HashSet::new(),
             header_entry: HashMap::new(),
             header_exits: HashMap::new(),
@@ -152,7 +150,6 @@ impl<'a> GraphBuilder<'a> {
         for h in &self.index.headers {
             self.by_hid.insert(h.hid, h);
             idstr_to_hid.insert(h.id.as_str(), h.hid);
-            self.scope_root.entry(h.scope).or_insert(h.hid);
         }
         for h in &self.index.headers {
             if let Some(pid) = &h.parent_id {
@@ -206,9 +203,12 @@ impl<'a> GraphBuilder<'a> {
     fn build(mut self) -> (Graph, BamlMap<String, SerializedSpan>) {
         let mut tops: Vec<(String, usize, usize, ScopeId)> = Vec::new();
         let mut seen_scopes: HashSet<ScopeId> = HashSet::new();
+
+        let scope_root = build_scope_roots(self.index);
+
         for h in &self.index.headers {
             if seen_scopes.insert(h.scope) {
-                let root_hid = self.scope_root[&h.scope];
+                let root_hid = scope_root[&h.scope];
                 if !self.nested_targets.contains(&root_hid) {
                     let root = self.by_hid[&root_hid];
                     tops.push((
@@ -690,4 +690,13 @@ impl MermaidRenderer {
 #[inline]
 fn escape_label(s: &str) -> String {
     s.replace('"', "&quot;")
+}
+
+fn build_scope_roots(index: &HeaderIndex) -> HashMap<ScopeId, Hid> {
+    // iterate the headers by scope order. The first one to appear is the scope root.
+    let mut scope_root = HashMap::new();
+    for h in &index.headers {
+        scope_root.entry(h.scope).or_insert(h.hid);
+    }
+    scope_root
 }
