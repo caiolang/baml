@@ -1,3 +1,4 @@
+/// Renderer-agnostic graph model and builder
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
