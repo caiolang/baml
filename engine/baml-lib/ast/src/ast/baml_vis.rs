@@ -115,7 +115,6 @@ struct GraphBuilder<'a> {
     md_children: HashMap<Hid, Vec<Hid>>,
     has_md_parent: HashSet<Hid>,
     nested_children: HashMap<Hid, Vec<Hid>>,
-    nested_targets: HashSet<Hid>,
     header_entry: HashMap<Hid, String>,
     header_exits: HashMap<Hid, Vec<String>>,
     // we're going to need stable iteration in snapshot tests.
@@ -135,7 +134,6 @@ impl<'a> GraphBuilder<'a> {
             md_children: HashMap::new(),
             has_md_parent: HashSet::new(),
             nested_children: HashMap::new(),
-            nested_targets: HashSet::new(),
             header_entry: HashMap::new(),
             header_exits: HashMap::new(),
             span_map: BamlMap::new(),
@@ -162,13 +160,9 @@ impl<'a> GraphBuilder<'a> {
                 }
             }
         }
-        for (p, c) in self.index.nested_edges_hid_iter() {
-            let ph = self.by_hid[p];
-            let ch = self.by_hid[c];
-            if ph.scope != ch.scope {
-                self.nested_children.entry(*p).or_default().push(*c);
-                self.nested_targets.insert(*c);
-            }
+
+        for (p, c) in nested_scope_edges(self.index, &self.by_hid) {
+            self.nested_children.entry(*p).or_default().push(*c);
         }
     }
 
@@ -205,11 +199,15 @@ impl<'a> GraphBuilder<'a> {
         let mut seen_scopes: HashSet<ScopeId> = HashSet::new();
 
         let scope_root = build_scope_roots(self.index);
+        // NOTE: the check is negated (!contains), but there's no easy way yet to get
+        // all non-nested targets. Building the opposite set requires iterating through the nested
+        // targets anyway.
+        let nested_targets: HashSet<_> = all_nested_targets(self.index, &self.by_hid).collect();
 
         for h in &self.index.headers {
             if seen_scopes.insert(h.scope) {
                 let root_hid = scope_root[&h.scope];
-                if !self.nested_targets.contains(&root_hid) {
+                if !nested_targets.contains(&root_hid) {
                     let root = self.by_hid[&root_hid];
                     tops.push((
                         root.span.file.path_buf().to_string_lossy().into_owned(),
@@ -699,4 +697,22 @@ fn build_scope_roots(index: &HeaderIndex) -> HashMap<ScopeId, Hid> {
         scope_root.entry(h.scope).or_insert(h.hid);
     }
     scope_root
+}
+
+fn all_nested_targets<'iter>(
+    index: &'iter HeaderIndex,
+    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
+) -> impl Iterator<Item = Hid> + 'iter {
+    nested_scope_edges(index, by_hid).map(|(_, c)| c)
+}
+
+/// Edges that cross a scope enter, i.e not just header changes.
+fn nested_scope_edges<'iter>(
+    index: &'iter HeaderIndex,
+    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
+) -> impl Iterator<Item = (Hid, Hid)> + 'iter {
+    index
+        .nested_edges_hid_iter()
+        .filter(|(p, c)| by_hid[p].scope != by_hid[c].scope)
+        .copied()
 }
