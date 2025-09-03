@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 /// Config: maximum number of direct children (markdown + nested) a non-branching
 /// container may have to be flattened into a linear sequence instead of a subgraph.
@@ -166,12 +169,9 @@ impl<'index> GraphBuilder<'index> {
     }
 
     // Compute a tuple position key for stable ordering comparisons
-    fn pos_tuple(&self, hid: Hid) -> (String, usize) {
+    fn pos_tuple(&self, hid: Hid) -> (&'index Path, usize) {
         let h = self.by_hid[&hid];
-        (
-            h.span.file.path_buf().to_string_lossy().into_owned(),
-            h.span.start,
-        )
+        (h.span.file.path_buf().as_ref(), h.span.start)
     }
 
     // Merge two already-ordered lists by source position, preserving internal order
