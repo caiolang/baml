@@ -81,7 +81,10 @@ pub struct HeaderIndex {
 
 impl HeaderIndex {
     /// Iterate headers in a scope without allocation
-    pub fn headers_in_scope_iter(&self, scope: ScopeId) -> impl Iterator<Item = &RenderableHeader> {
+    pub fn headers_in_scope_iter(
+        &self,
+        scope: ScopeId,
+    ) -> impl Iterator<Item = &RenderableHeader> + DoubleEndedIterator {
         self.by_scope
             .get(&scope)
             .into_iter()

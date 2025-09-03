@@ -92,10 +92,13 @@ struct GraphBuilder<'index, 'pre> {
     graph: Graph<'index>,
     next_node: u32,
     next_cluster: u32,
+    // TODO: add Prelude ref directly.
     by_hid: &'pre HashMap<Hid, &'index RenderableHeader>,
     md_children: &'pre HashMap<Hid, Vec<Hid>>,
     has_md_parent: &'pre HashSet<Hid>,
     nested_children: &'pre HashMap<Hid, Vec<Hid>>,
+    nested_targets: &'pre HashSet<Hid>,
+
     // TODO: check visit order
     header_entry: HashMap<Hid, NodeId>,
     header_exits: HashMap<Hid, Vec<NodeId>>,
@@ -113,9 +116,10 @@ struct Prelude<'index> {
     md_children: HashMap<Hid, Vec<Hid>>,
     /// Set of nodes that have a markdown header parent.
     has_md_parent: HashSet<Hid>,
-    // TODO: check if this can be merged with `md_children`
     /// For nested edges, the ones that cross a code scope.
     nested_children: HashMap<Hid, Vec<Hid>>,
+    /// The set of all [`Hid`] that are nested children.
+    nested_targets: HashSet<Hid>,
 }
 
 impl<'index> Prelude<'index> {
@@ -143,9 +147,11 @@ impl<'index> Prelude<'index> {
         }
 
         let mut nested_children: HashMap<_, Vec<_>> = HashMap::new();
+        let mut nested_targets: HashSet<_> = HashSet::new();
 
         for (p, c) in nested_scope_edges(index, &by_hid) {
             nested_children.entry(p).or_default().push(c);
+            nested_targets.insert(c);
         }
 
         Self {
@@ -153,6 +159,7 @@ impl<'index> Prelude<'index> {
             md_children,
             has_md_parent,
             nested_children,
+            nested_targets,
         }
     }
 }
@@ -169,6 +176,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             md_children: &pre.md_children,
             has_md_parent: &pre.has_md_parent,
             nested_children: &pre.nested_children,
+            nested_targets: &pre.nested_targets,
             header_entry: HashMap::new(),
             header_exits: HashMap::new(),
             span_map: BamlMap::new(),
@@ -181,15 +189,11 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         let mut seen_scopes: HashSet<ScopeId> = HashSet::new();
 
         let scope_root = build_scope_roots(self.index);
-        // NOTE: the check is negated (!contains), but there's no easy way yet to get
-        // all non-nested targets. Building the opposite set requires iterating through the nested
-        // targets anyway.
-        let nested_targets: HashSet<_> = all_nested_targets(self.index, &self.by_hid).collect();
 
         for h in &self.index.headers {
             if seen_scopes.insert(h.scope) {
                 let root_hid = scope_root[&h.scope];
-                if !nested_targets.contains(&root_hid) {
+                if !self.nested_targets.contains(&root_hid) {
                     let root = self.by_hid[&root_hid];
                     tops.push((
                         root.span.file.path_buf().to_string_lossy().into_owned(),
@@ -239,12 +243,20 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
     // NOTE: we may wont to make the caches have more lifetime
     // than build so that we can return &'cache [NodeId] after writing.
+    // TODO: in process of changing signature so that it does not return anything & we just get
+    // from the built cache.
     fn build_header(
         &mut self,
         hid: Hid,
+        // TODO: understand  why this exists!
         visited_scopes: &mut HashSet<ScopeId>,
         parent_cluster: Option<ClusterId>,
     ) -> (NodeId, Vec<NodeId>) {
+        // NOTE:
+        // - `build_scope_sequence` is only called for `nested_children`, which we also have a
+        // HashSet of.
+
+        // TODO: there should be no cache hit since there are no cycles!
         if let Some(entry) = self.header_entry.get(&hid).copied() {
             let exits = self
                 .header_exits
@@ -260,11 +272,8 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             .get(&hid)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let has_md = !md_children.is_empty();
-        let has_nested = !nested_children.is_empty();
-        let is_branching = header.label_kind == HeaderLabelKind::If;
 
-        if !has_md && !has_nested {
+        if md_children.is_empty() && nested_children.is_empty() {
             let node_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
             self.span_map.insert(node_id, span.clone());
@@ -282,58 +291,11 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             return (node_id, vec![node_id]);
         }
 
-        let total_children = md_children.len() + nested_children.len();
-        let mut single_nested_child_has_multiple_items = false;
-        if nested_children.len() == 1 {
-            let child_root = self.by_hid[&nested_children[0]];
-            let count = self.index.headers_in_scope_iter(child_root.scope).count();
-            single_nested_child_has_multiple_items = count > 1;
-        }
-        let should_flatten = !is_branching
-            && total_children <= MAX_CHILDREN_TO_FLATTEN
-            && !(nested_children.len() == 1 && single_nested_child_has_multiple_items);
+        if header.label_kind == HeaderLabelKind::If {
+            // pre-order/post-order notation:
+            // <pre/post>-order: <name> [[output] <- <dependency list>]
 
-        if should_flatten {
-            let node_id = self.new_node_id();
-            let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(node_id, span.clone());
-            let kind = if is_branching {
-                NodeKind::Decision(hid, Some(span.clone()))
-            } else {
-                NodeKind::Header(hid, Some(span.clone()))
-            };
-            self.graph.nodes.push(Node {
-                id: node_id,
-                label: header.title.as_ref(),
-                kind,
-                cluster: parent_cluster,
-            });
-            self.header_entry.insert(hid, node_id);
-            let exits = if md_children.len() == 1 {
-                let (c_entry, c_exits) =
-                    self.build_header(md_children[0], visited_scopes, parent_cluster);
-                self.graph.edges.push(Edge {
-                    from: node_id,
-                    to: c_entry,
-                });
-                c_exits
-            } else if nested_children.len() == 1 {
-                let child_root_hid = nested_children[0];
-                let child_scope = self.by_hid[&child_root_hid].scope;
-                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster);
-                let (c_entry, c_exits) =
-                    self.build_header(child_root_hid, visited_scopes, parent_cluster);
-                self.graph.edges.push(Edge {
-                    from: node_id,
-                    to: c_entry,
-                });
-                c_exits
-            };
-            self.header_exits.insert(hid, exits);
-            return (node_id, exits);
-        }
-
-        if is_branching {
+            // pre-order: assign cluster ids: cluster_id <- header, parent_cluster
             let cluster_id = self.new_cluster_id();
             self.graph.clusters.push(Cluster {
                 id: cluster_id,
@@ -341,6 +303,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                 parent: parent_cluster,
             });
 
+            // pre-order: insert entry <- header, cluster_id
             let decision_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
             self.span_map.insert(decision_id, span.clone());
@@ -351,32 +314,55 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                 cluster: Some(cluster_id),
             });
             self.header_entry.insert(hid, decision_id);
+
+            // unordered: render_calls_for_header <- header_entry, cluster_id
+
             if self.cfg.show_call_nodes {
                 self.render_calls_for_header(hid, decision_id, Some(cluster_id));
             }
 
-            let mut branch_exits = Vec::new();
-            for child_root_hid in nested_children.iter() {
-                let child_scope = self.by_hid[child_root_hid].scope;
+            // post-order: build scope sequence for scope & build header
+            // header_entry, header_exit <- cluster_id.
+            // For some reason it can't work without a visited_scopes? That's pre-order data.
+            for child_root_id in nested_children {
+                let child_scope = self.by_hid[child_root_id].scope;
                 self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
-                let (entry, exits) =
-                    self.build_header(*child_root_hid, visited_scopes, Some(cluster_id));
-                self.graph.edges.push(Edge {
-                    from: decision_id,
-                    to: entry,
-                });
-                if self.cfg.show_call_nodes {
-                    self.render_calls_for_header(*child_root_hid, entry, Some(cluster_id));
-                }
-                branch_exits.extend(exits);
+                self.build_header(*child_root_id, visited_scopes, Some(cluster_id));
             }
 
-            // NOTE: here we discard the Vec<>  from `build_header`!
-            let md_ids_only: Vec<_> = md_children
+            // post-order: build header for each of the markdown children <- cluster_id.
+            // Same doubt wrt visited_scopes.
+            for child in md_children {
+                self.build_header(*child, visited_scopes, Some(cluster_id));
+            }
+
+            // unordered: add edges from decision id to children <- decision_id
+            self.graph
+                .edges
+                .extend(nested_children.iter().map(|child_root_id| Edge {
+                    from: decision_id,
+                    to: self.header_entry[child_root_id],
+                }));
+
+            // unordered: render_calls_for_header <- header_entry, cluster_id
+            if self.cfg.show_call_nodes {
+                for child_root_hid in nested_children {
+                    self.render_calls_for_header(
+                        *child_root_hid,
+                        self.header_entry[child_root_hid],
+                        Some(cluster_id),
+                    );
+                }
+            }
+
+            // post-order: collect branch exits <- header_exits
+            let branch_exits: Vec<_> = nested_children
                 .iter()
+                .flat_map(|child_hid| &self.header_exits[child_hid])
                 .copied()
-                .map(|ch| self.build_header(ch, visited_scopes, Some(cluster_id)).0)
                 .collect();
+
+            let md_ids_only: Vec<_> = md_children.iter().map(|ch| self.header_entry[ch]).collect();
 
             if let Some(first_md) = md_ids_only.first().copied() {
                 if !branch_exits.is_empty() {
@@ -393,10 +379,11 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                     });
                 }
             }
-            for win in md_ids_only.windows(2) {
-                let (a, b) = (&win[0], &win[1]);
-                self.graph.edges.push(Edge { from: *a, to: *b });
-            }
+            self.graph.edges.extend(md_ids_only.windows(2).map(|win| {
+                let from = win[0];
+                let to = win[1];
+                Edge { from, to }
+            }));
             let outward = if let Some(last) = md_ids_only.last().copied() {
                 vec![last]
             } else {
@@ -406,6 +393,86 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             return (decision_id, outward);
         }
 
+        let single_nested_child_has_multiple_items = nested_children.len() == 1 && {
+            let child_root = self.by_hid[&nested_children[0]];
+            let count = self.index.headers_in_scope_iter(child_root.scope).count();
+            count > 1
+        };
+
+        let total_children = md_children.len() + nested_children.len();
+
+        // pre-order: handle whether a node should be flattened.
+        // -> will discard all of children array (md / nested) if len() != 1.
+        // That also means not visiting any of the children.
+        let should_flatten =
+            total_children <= MAX_CHILDREN_TO_FLATTEN && !single_nested_child_has_multiple_items;
+
+        if should_flatten {
+            // pre-order add & assign node id to header
+            let node_id = self.new_node_id();
+            let span = SerializedSpan::serialize(&header.span);
+            self.span_map.insert(node_id, span.clone());
+            self.graph.nodes.push(Node {
+                id: node_id,
+                label: header.title.as_ref(),
+                kind: NodeKind::Header(hid, Some(span.clone())),
+                cluster: parent_cluster,
+            });
+
+            self.header_entry.insert(hid, node_id);
+
+            // TODO: classify child & what to do inside flattened, like scope sequence needed or
+            // not.
+
+            // post-order: build scope sequence for child scope, only when flatten is single child.
+            // This may be implicit if the child is marked as visited.
+            if md_children.len() != 1 && nested_children.len() == 1 {
+                let child_root_hid = nested_children[0];
+                let child_scope = self.by_hid[&child_root_hid].scope;
+                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster);
+            }
+
+            // post-order: run children headers
+            if md_children.len() == 1 {
+                self.build_header(md_children[0], visited_scopes, parent_cluster);
+            } else if nested_children.len() == 1 {
+                let child_root_hid = nested_children[0];
+                self.build_header(child_root_hid, visited_scopes, parent_cluster);
+            }
+
+            // unordered: add edges <- node_id, children id
+
+            if md_children.len() == 1 {
+                let c_entry = self.header_entry[&md_children[0]];
+
+                self.graph.edges.push(Edge {
+                    from: node_id,
+                    to: c_entry,
+                });
+            } else if nested_children.len() == 1 {
+                let c_entry = self.header_entry[&nested_children[0]];
+                self.graph.edges.push(Edge {
+                    from: node_id,
+                    to: c_entry,
+                });
+            }
+
+            // post-order: copy exits from children.
+            // NOTE: we could reference them, but the vecs are pretty small.
+            let exits = if md_children.len() == 1 {
+                self.header_exits[&md_children[0]].to_owned()
+            } else if nested_children.len() == 1 {
+                self.header_exits[&nested_children[0]].to_owned()
+            } else {
+                vec![node_id]
+            };
+
+            self.header_exits.insert(hid, exits.clone());
+            return (node_id, exits);
+        }
+
+        // pre-order: assign cluster id cluster_id <- header, parent_cluster
+
         let cluster_id = self.new_cluster_id();
         self.graph.clusters.push(Cluster {
             id: cluster_id,
@@ -414,64 +481,82 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             parent: parent_cluster,
         });
 
-        // Merge markdown children and direct nested roots, preserving each list's internal order
-        let items_merged = merge_by_pos(self.by_hid, &md_children, &nested_children);
+        // pre-order: build scope sequence <- cluster_id, visited_scopes. Only for direct nested
+        // children.
+        for child_hid in nested_children {
+            let child_scope = self.by_hid[&child_hid].scope;
+            self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
+        }
 
-        let mut first_rep: Option<_> = None;
-        let mut prev_exits: Option<_> = None;
-        for child_hid in items_merged {
-            // If this child is a direct nested root for the current container, prebuild its scope
-            // inside this container's cluster and use the scope's final exits.
-            let mut prebuilt_scope_last_exits = None;
-            if nested_children.contains(&child_hid) {
+        // Merge markdown children and direct nested roots, preserving each list's internal order
+        let items_merged: Vec<_> =
+            merge_by_pos(self.by_hid, &md_children, &nested_children).collect();
+
+        // pre-order: build header for all children. <- cluster_id
+        for &child_hid in &items_merged {
+            self.build_header(child_hid, visited_scopes, Some(cluster_id));
+        }
+
+        // We should have at least one item, since empty children are handled separately.
+        let first_rep = self.header_entry[&items_merged[0]];
+
+        // unordered: create edges <- header_exits.
+        // Left scan for choosing exits, although choosing fn is not expensive so it can be
+        // executed twice.
+
+        let mut choose_exits_hid = |child_hid| {
+            // NOTE: since nested children Hids are marked, can we use pre?
+            let prebuilt_scope_last_exits = if nested_children.contains(&child_hid) {
                 let child_scope = self.by_hid[&child_hid].scope;
-                self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
-                let scope_items: Vec<Hid> = self
+                let maybe_last_in_scope = self
                     .index
                     .headers_in_scope_iter(child_scope)
-                    .filter(|h| !self.has_md_parent.contains(&h.hid))
+                    .rev()
                     .map(|h| h.hid)
-                    .collect();
-                if let Some(&last_in_scope) = scope_items.last() {
-                    if let Some(ex) = self.header_exits.get(&last_in_scope).cloned() {
-                        prebuilt_scope_last_exits = Some(ex);
-                    }
-                }
-            }
+                    .find(|h| !self.has_md_parent.contains(h));
 
-            let (entry, mut exits) = self.build_header(child_hid, visited_scopes, Some(cluster_id));
-            if let Some(scope_exits) = prebuilt_scope_last_exits.take() {
-                exits = scope_exits;
-            }
-            if first_rep.is_none() {
-                first_rep = Some(entry);
-            }
-            if let Some(prev) = prev_exits.take() {
-                for e in prev {
-                    self.graph.edges.push(Edge { from: e, to: entry });
-                }
-            }
-            prev_exits = Some(exits);
-        }
-        let entry = first_rep.unwrap_or_else(|| {
-            // Create a placeholder node if the container is empty.
-            let node_id = self.new_node_id();
-            let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(node_id, span.clone());
-            self.graph.nodes.push(Node {
-                id: node_id,
-                label: header.title.as_ref(),
-                kind: NodeKind::Header(hid, Some(span)),
-                cluster: Some(cluster_id),
+                maybe_last_in_scope.filter(|l| self.header_exits.contains_key(l))
+            } else {
+                None
+            };
+
+            prebuilt_scope_last_exits.unwrap_or(child_hid)
+        };
+
+        // NOTE: using Hid instead of direct reference since otherwise we lock writes to
+        // `self.header_exits`. We know that invalidating the reference that we hold is not possible
+        // but we cannot communicate this to Rust.
+        let mut prev_exits_hid = choose_exits_hid(items_merged[0]);
+
+        for &child_hid in &items_merged[1..] {
+            let entry = self.header_entry[&child_hid];
+
+            let exits_hid = choose_exits_hid(child_hid);
+            let prev = std::mem::replace(&mut prev_exits_hid, exits_hid);
+
+            // NOTE: using `extend` in a loop. Since most nodes will only have 1 or 2 children,
+            // impact is covered by exponential allocation.
+            //
+            // The full iterator is `FlatMap`, it doesn't implement `ExactSizedIterator`
+            // and doesn't have a reliable size_hint, so the perf fix here is to precalculate
+            // the total exit count with a .iter().map().sum().
+            let edges_prev = self.header_exits[&prev].iter().copied().map(|exit| Edge {
+                from: exit,
+                to: entry,
             });
-            node_id
-        });
-        let exits = prev_exits.unwrap_or_else(|| vec![entry]);
+
+            self.graph.edges.extend(edges_prev);
+        }
+
+        let entry = first_rep;
         self.header_entry.insert(hid, entry);
+        let exits = self.header_exits[&prev_exits_hid].to_owned();
         self.header_exits.insert(hid, exits.clone());
         (entry, exits)
     }
 
+    /// If header is in [`HeaderIndex::header_calls`], inserts & links a call node to the
+    /// given header node.
     fn render_calls_for_header(
         &mut self,
         hid: Hid,
@@ -563,13 +648,6 @@ fn build_scope_roots(index: &HeaderIndex) -> HashMap<ScopeId, Hid> {
         scope_root.entry(h.scope).or_insert(h.hid);
     }
     scope_root
-}
-
-fn all_nested_targets<'iter>(
-    index: &'iter HeaderIndex,
-    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
-) -> impl Iterator<Item = Hid> + 'iter {
-    nested_scope_edges(index, by_hid).map(|(_, c)| c)
 }
 
 /// Edges that cross a scope enter, i.e not just header changes.
