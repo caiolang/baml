@@ -23,7 +23,7 @@ pub fn build<'index>(
     index: &'index HeaderIndex,
     config: BuilderConfig,
 ) -> (Graph<'index>, BamlMap<NodeId, SerializedSpan>) {
-    let builder = GraphBuilder::new(&index, config);
+    let builder = GraphBuilder::new(index, config);
     let (graph, span_map) = builder.build();
     (graph, span_map)
 }
@@ -222,12 +222,12 @@ impl<'index> GraphBuilder<'index> {
 
         let mut prev_exits = None;
         for hid in items {
-            let (entry, exits) = self.build_header(hid, visited_scopes, parent_cluster.clone());
+            let (entry, exits) = self.build_header(hid, visited_scopes, parent_cluster);
             if let Some(prev) = prev_exits.take() {
                 for e in prev {
                     self.graph.edges.push(Edge {
                         from: e,
-                        to: entry.clone(),
+                        to: entry,
                     });
                 }
             }
@@ -243,12 +243,12 @@ impl<'index> GraphBuilder<'index> {
         visited_scopes: &mut HashSet<ScopeId>,
         parent_cluster: Option<ClusterId>,
     ) -> (NodeId, Vec<NodeId>) {
-        if let Some(entry) = self.header_entry.get(&hid).cloned() {
+        if let Some(entry) = self.header_entry.get(&hid).copied() {
             let exits = self
                 .header_exits
                 .get(&hid)
                 .cloned()
-                .unwrap_or_else(|| vec![entry.clone()]);
+                .unwrap_or_else(|| vec![entry]);
             return (entry, exits);
         }
         let header = self.by_hid[&hid];
@@ -261,19 +261,19 @@ impl<'index> GraphBuilder<'index> {
         if !has_md && !has_nested {
             let node_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(node_id.clone(), span.clone());
+            self.span_map.insert(node_id, span.clone());
             self.graph.nodes.push(Node {
-                id: node_id.clone(),
+                id: node_id,
                 label: header.title.as_ref(),
                 kind: NodeKind::Header(hid, Some(span)),
                 cluster: parent_cluster,
             });
-            self.header_entry.insert(hid, node_id.clone());
-            self.header_exits.insert(hid, vec![node_id.clone()]);
+            self.header_entry.insert(hid, node_id);
+            self.header_exits.insert(hid, vec![node_id]);
             if self.cfg.show_call_nodes {
-                self.render_calls_for_header(hid, node_id, parent_cluster.clone());
+                self.render_calls_for_header(hid, node_id, parent_cluster);
             }
-            return (node_id.clone(), vec![node_id]);
+            return (node_id, vec![node_id]);
         }
 
         let total_children = md_children.len() + nested_children.len();
@@ -290,37 +290,37 @@ impl<'index> GraphBuilder<'index> {
         if should_flatten {
             let node_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(node_id.clone(), span.clone());
+            self.span_map.insert(node_id, span.clone());
             let kind = if is_branching {
                 NodeKind::Decision(hid, Some(span.clone()))
             } else {
                 NodeKind::Header(hid, Some(span.clone()))
             };
             self.graph.nodes.push(Node {
-                id: node_id.clone(),
+                id: node_id,
                 label: header.title.as_ref(),
                 kind,
-                cluster: parent_cluster.clone(),
+                cluster: parent_cluster,
             });
-            self.header_entry.insert(hid, node_id.clone());
-            let mut exits = vec![node_id.clone()];
+            self.header_entry.insert(hid, node_id);
+            let mut exits = vec![node_id];
             if md_children.len() == 1 {
                 let (c_entry, c_exits) =
-                    self.build_header(md_children[0], visited_scopes, parent_cluster.clone());
+                    self.build_header(md_children[0], visited_scopes, parent_cluster);
                 self.graph.edges.push(Edge {
-                    from: node_id.clone(),
-                    to: c_entry.clone(),
+                    from: node_id,
+                    to: c_entry,
                 });
                 exits = c_exits;
             } else if nested_children.len() == 1 {
                 let child_root_hid = nested_children[0];
                 let child_scope = self.by_hid[&child_root_hid].scope;
-                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster.clone());
+                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster);
                 let (c_entry, c_exits) =
-                    self.build_header(child_root_hid, visited_scopes, parent_cluster.clone());
+                    self.build_header(child_root_hid, visited_scopes, parent_cluster);
                 self.graph.edges.push(Edge {
-                    from: node_id.clone(),
-                    to: c_entry.clone(),
+                    from: node_id,
+                    to: c_entry,
                 });
                 exits = c_exits;
             }
@@ -333,19 +333,19 @@ impl<'index> GraphBuilder<'index> {
             self.graph.clusters.push(Cluster {
                 id: cluster_id,
                 label: header.title.as_ref(),
-                parent: parent_cluster.clone(),
+                parent: parent_cluster,
             });
 
             let decision_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(decision_id.clone(), span.clone());
+            self.span_map.insert(decision_id, span.clone());
             self.graph.nodes.push(Node {
-                id: decision_id.clone(),
+                id: decision_id,
                 label: header.title.as_ref(),
                 kind: NodeKind::Decision(hid, Some(span)),
                 cluster: Some(cluster_id),
             });
-            self.header_entry.insert(hid, decision_id.clone());
+            self.header_entry.insert(hid, decision_id);
             if self.cfg.show_call_nodes {
                 self.render_calls_for_header(hid, decision_id, Some(cluster_id));
             }
@@ -357,8 +357,8 @@ impl<'index> GraphBuilder<'index> {
                 let (entry, exits) =
                     self.build_header(*child_root_hid, visited_scopes, Some(cluster_id));
                 self.graph.edges.push(Edge {
-                    from: decision_id.clone(),
-                    to: entry.clone(),
+                    from: decision_id,
+                    to: entry,
                 });
                 if self.cfg.show_call_nodes {
                     self.render_calls_for_header(*child_root_hid, entry, Some(cluster_id));
@@ -377,25 +377,25 @@ impl<'index> GraphBuilder<'index> {
                 if !branch_exits.is_empty() {
                     for e in branch_exits.iter() {
                         self.graph.edges.push(Edge {
-                            from: e.clone(),
-                            to: first_md.clone(),
+                            from: *e,
+                            to: first_md,
                         });
                     }
                 } else {
                     self.graph.edges.push(Edge {
-                        from: decision_id.clone(),
-                        to: first_md.clone(),
+                        from: decision_id,
+                        to: first_md,
                     });
                 }
             }
             for win in md_ids_only.windows(2) {
                 let (a, b) = (&win[0], &win[1]);
                 self.graph.edges.push(Edge {
-                    from: a.clone(),
-                    to: b.clone(),
+                    from: *a,
+                    to: *b,
                 });
             }
-            let outward = if let Some(last) = md_ids_only.last().cloned() {
+            let outward = if let Some(last) = md_ids_only.last().copied() {
                 vec![last]
             } else {
                 branch_exits
@@ -409,7 +409,7 @@ impl<'index> GraphBuilder<'index> {
             id: cluster_id,
             label: header.title.as_ref(),
             // TODO: clone() on copy
-            parent: parent_cluster.clone(),
+            parent: parent_cluster,
         });
 
         // Merge markdown children and direct nested roots, preserving each list's internal order
@@ -444,7 +444,7 @@ impl<'index> GraphBuilder<'index> {
                 exits = scope_exits;
             }
             if first_rep.is_none() {
-                first_rep = Some(entry.clone());
+                first_rep = Some(entry);
             }
             if let Some(prev) = prev_exits.take() {
                 for e in prev {
@@ -459,7 +459,7 @@ impl<'index> GraphBuilder<'index> {
             let span = SerializedSpan::serialize(&header.span);
             self.span_map.insert(node_id, span.clone());
             self.graph.nodes.push(Node {
-                id: node_id.clone(),
+                id: node_id,
                 label: header.title.as_ref(),
                 kind: NodeKind::Header(hid, Some(span)),
                 cluster: Some(cluster_id),
@@ -490,7 +490,7 @@ impl<'index> GraphBuilder<'index> {
                 }
                 let call_node_id = self.new_node_id();
                 self.graph.nodes.push(Node {
-                    id: call_node_id.clone(),
+                    id: call_node_id,
                     label: callee.as_str(),
                     kind: NodeKind::Call {
                         header: hid,
@@ -499,8 +499,8 @@ impl<'index> GraphBuilder<'index> {
                     cluster,
                 });
                 self.graph.edges.push(Edge {
-                    from: call_node_id.into(),
-                    to: header_rep_id.into(),
+                    from: call_node_id,
+                    to: header_rep_id,
                 });
                 self.call_node_cache.insert((hid, callee), call_node_id);
             }
@@ -536,12 +536,12 @@ impl serde::Serialize for NodeId {
 
 impl std::fmt::Debug for ClusterId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 impl std::fmt::Debug for NodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 

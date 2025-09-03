@@ -65,14 +65,14 @@ fn render_mermaid_graph(
     let mut children_by_parent: BamlMap<_, Vec<_>> = BamlMap::new();
     for c in &graph.clusters {
         children_by_parent
-            .entry(c.parent.clone())
+            .entry(c.parent)
             .or_default()
             .push(c);
     }
     let mut nodes_by_cluster: BamlMap<_, Vec<_>> = BamlMap::new();
     for n in &graph.nodes {
         nodes_by_cluster
-            .entry(n.cluster.clone())
+            .entry(n.cluster)
             .or_default()
             .push(n);
     }
@@ -86,14 +86,14 @@ fn render_mermaid_graph(
         indent: usize,
     ) {
         let indent_str = " ".repeat(indent);
-        let key = cluster.map(|c| c.id.clone());
-        let key_opt = key.clone();
+        let key = cluster.map(|c| c.id);
+        let key_opt = key;
         if let Some(c) = cluster {
             out.push(format!(
                 "{}subgraph {}[\"{}\"]",
                 indent_str,
                 c.id,
-                escape_label(&c.label)
+                escape_label(c.label)
             ));
             out.push(format!("{indent_str}  direction LR"));
         }
@@ -105,7 +105,7 @@ fn render_mermaid_graph(
                             "{}  {}{{\"{}\"}}",
                             indent_str,
                             n.id,
-                            escape_label(&n.label)
+                            escape_label(n.label)
                         ));
                         // Always emit decisionNode class line to match expected output
                         out.push(format!("{}  class {} decisionNode;", indent_str, n.id));
@@ -115,7 +115,7 @@ fn render_mermaid_graph(
                             "{}  {}[\"{}\"]",
                             indent_str,
                             n.id,
-                            escape_label(&n.label)
+                            escape_label(n.label)
                         ));
                         if use_fancy && SHOW_CALL_NODES {
                             out.push(format!("{}  class {} callNode;", indent_str, n.id));
@@ -126,7 +126,7 @@ fn render_mermaid_graph(
                             "{}  {}[\"{}\"]",
                             indent_str,
                             n.id,
-                            escape_label(&n.label)
+                            escape_label(n.label)
                         ));
                     }
                 }
