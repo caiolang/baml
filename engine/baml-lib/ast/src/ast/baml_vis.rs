@@ -58,17 +58,17 @@ enum Direction {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-enum NodeKind {
+enum NodeKind<'index> {
     Header(Hid, Option<SerializedSpan>),
     Decision(Hid, Option<SerializedSpan>),
-    Call { header: Hid, callee: String },
+    Call { header: Hid, callee: &'index str },
 }
 
 #[derive(Debug, Clone)]
-struct Node {
+struct Node<'index> {
     id: NodeId,
-    label: String,
-    kind: NodeKind,
+    label: &'index str,
+    kind: NodeKind<'index>,
     cluster: Option<ClusterId>,
 }
 
@@ -78,17 +78,17 @@ struct Edge {
     to: NodeId,
 }
 #[derive(Debug, Clone)]
-struct Cluster {
+struct Cluster<'index> {
     id: ClusterId,
-    label: String,
+    label: &'index str,
     parent: Option<ClusterId>,
 }
 
 #[derive(Debug, Default)]
-struct Graph {
-    nodes: Vec<Node>,
+struct Graph<'index> {
+    nodes: Vec<Node<'index>>,
     edges: Vec<Edge>,
-    clusters: Vec<Cluster>,
+    clusters: Vec<Cluster<'index>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +107,7 @@ impl Default for BuilderConfig {
 struct GraphBuilder<'index> {
     index: &'index HeaderIndex,
     cfg: BuilderConfig,
-    graph: Graph,
+    graph: Graph<'index>,
     next_node: u32,
     next_cluster: u32,
     by_hid: HashMap<Hid, &'index RenderableHeader>,
@@ -118,11 +118,11 @@ struct GraphBuilder<'index> {
     header_exits: HashMap<Hid, Vec<NodeId>>,
     // we're going to need stable iteration in snapshot tests.
     span_map: BamlMap<NodeId, SerializedSpan>,
-    call_node_cache: HashMap<(Hid, String), NodeId>,
+    call_node_cache: HashMap<(Hid, &'index str), NodeId>,
 }
 
-impl<'a> GraphBuilder<'a> {
-    fn new(index: &'a HeaderIndex, cfg: BuilderConfig) -> Self {
+impl<'index> GraphBuilder<'index> {
+    fn new(index: &'index HeaderIndex, cfg: BuilderConfig) -> Self {
         let mut b = Self {
             index,
             cfg,
@@ -193,7 +193,7 @@ impl<'a> GraphBuilder<'a> {
         out
     }
 
-    fn build(mut self) -> (Graph, BamlMap<NodeId, SerializedSpan>) {
+    fn build(mut self) -> (Graph<'index>, BamlMap<NodeId, SerializedSpan>) {
         let mut tops: Vec<(String, usize, usize, ScopeId)> = Vec::new();
         let mut seen_scopes: HashSet<ScopeId> = HashSet::new();
 
@@ -286,9 +286,9 @@ impl<'a> GraphBuilder<'a> {
             self.span_map.insert(node_id.clone(), span.clone());
             self.graph.nodes.push(Node {
                 id: node_id.clone(),
-                label: header.title.to_string(),
+                label: header.title.as_ref(),
                 kind: NodeKind::Header(hid, Some(span)),
-                cluster: parent_cluster.clone(),
+                cluster: parent_cluster,
             });
             self.header_entry.insert(hid, node_id.clone());
             self.header_exits.insert(hid, vec![node_id.clone()]);
@@ -320,7 +320,7 @@ impl<'a> GraphBuilder<'a> {
             };
             self.graph.nodes.push(Node {
                 id: node_id.clone(),
-                label: header.title.to_string(),
+                label: header.title.as_ref(),
                 kind,
                 cluster: parent_cluster.clone(),
             });
@@ -354,7 +354,7 @@ impl<'a> GraphBuilder<'a> {
             let cluster_id = self.new_cluster_id();
             self.graph.clusters.push(Cluster {
                 id: cluster_id,
-                label: header.title.to_string(),
+                label: header.title.as_ref(),
                 parent: parent_cluster.clone(),
             });
 
@@ -363,7 +363,7 @@ impl<'a> GraphBuilder<'a> {
             self.span_map.insert(decision_id.clone(), span.clone());
             self.graph.nodes.push(Node {
                 id: decision_id.clone(),
-                label: header.title.to_string(),
+                label: header.title.as_ref(),
                 kind: NodeKind::Decision(hid, Some(span)),
                 cluster: Some(cluster_id),
             });
@@ -427,7 +427,8 @@ impl<'a> GraphBuilder<'a> {
         let cluster_id = self.new_cluster_id();
         self.graph.clusters.push(Cluster {
             id: cluster_id,
-            label: header.title.to_string(),
+            label: header.title.as_ref(),
+            // TODO: clone() on copy
             parent: parent_cluster.clone(),
         });
 
@@ -477,7 +478,7 @@ impl<'a> GraphBuilder<'a> {
             self.span_map.insert(node_id, span.clone());
             self.graph.nodes.push(Node {
                 id: node_id.clone(),
-                label: header.title.to_string(),
+                label: header.title.as_ref(),
                 kind: NodeKind::Header(hid, Some(span)),
                 cluster: Some(cluster_id),
             });
@@ -498,7 +499,7 @@ impl<'a> GraphBuilder<'a> {
         if let Some(callees) = self.index.header_calls.get(&hid) {
             for callee in callees {
                 // TODO: get rid of `callee.clone()`
-                if let Some(&cached_id) = self.call_node_cache.get(&(hid, callee.clone())) {
+                if let Some(&cached_id) = self.call_node_cache.get(&(hid, callee)) {
                     self.graph.edges.push(Edge {
                         from: cached_id,
                         to: header_rep_id,
@@ -508,10 +509,10 @@ impl<'a> GraphBuilder<'a> {
                 let call_node_id = self.new_node_id();
                 self.graph.nodes.push(Node {
                     id: call_node_id.clone(),
-                    label: callee.clone(),
+                    label: callee.as_str(),
                     kind: NodeKind::Call {
                         header: hid,
-                        callee: callee.clone(),
+                        callee,
                     },
                     cluster,
                 });
@@ -519,8 +520,7 @@ impl<'a> GraphBuilder<'a> {
                     from: call_node_id.into(),
                     to: header_rep_id.into(),
                 });
-                self.call_node_cache
-                    .insert((hid, callee.clone()), call_node_id);
+                self.call_node_cache.insert((hid, callee), call_node_id);
             }
         }
     }
@@ -579,7 +579,7 @@ struct MermaidRenderer;
 
 impl MermaidRenderer {
     fn render(
-        graph: &Graph,
+        graph: &Graph<'_>,
         direction: Direction,
         use_fancy: bool,
         span_map: BamlMap<NodeId, SerializedSpan>,
@@ -624,11 +624,11 @@ impl MermaidRenderer {
                 .push(n);
         }
 
-        fn emit(
+        fn emit<'index>(
             out: &mut Vec<String>,
-            cluster: Option<&Cluster>,
-            children_by_parent: &BamlMap<Option<ClusterId>, Vec<&Cluster>>,
-            nodes_by_cluster: &BamlMap<Option<ClusterId>, Vec<&Node>>,
+            cluster: Option<&Cluster<'index>>,
+            children_by_parent: &BamlMap<Option<ClusterId>, Vec<&Cluster<'index>>>,
+            nodes_by_cluster: &BamlMap<Option<ClusterId>, Vec<&Node<'index>>>,
             use_fancy: bool,
             indent: usize,
         ) {
