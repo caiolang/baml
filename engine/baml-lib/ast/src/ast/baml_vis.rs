@@ -28,17 +28,15 @@ use super::{
 /// are rendered inside the container. Sibling elements are connected linearly with `-->`.
 /// Connections never cross container boundaries; containers themselves are the units that
 /// connect to other elements.
-#[derive(Debug, Default)]
-pub struct BamlVisDiagramGenerator;
+pub mod diagram_generator {
+    use crate::ast::{Ast, HeaderCollector};
 
-impl BamlVisDiagramGenerator {
+    use super::{BuilderConfig, Direction, GraphBuilder, MermaidRenderer};
+
     /// Generate a Mermaid flowchart (LR) showing headers as linear steps and
     /// nested scopes as subgraphs.
     pub fn generate_headers_flowchart(ast: &Ast) -> String {
-        let index = HeaderCollector::collect(ast);
-        let builder = GraphBuilder::new(&index, BuilderConfig::default());
-        let (graph, span_map) = builder.build();
-        MermaidRenderer::render(&graph, Direction::TD, false, span_map)
+        generate_with_styling(ast, false)
     }
 
     /// Back-compat API used by the example. `use_fancy` toggles optional cosmetic styling.
@@ -388,12 +386,14 @@ impl<'index> GraphBuilder<'index> {
                 branch_exits.extend(exits);
             }
 
-            let mut md_ids_only = Vec::with_capacity(md_children.len());
-            for ch in md_children.iter() {
-                let (rep_id, _exits) = self.build_header(*ch, visited_scopes, Some(cluster_id));
-                md_ids_only.push(rep_id);
-            }
-            if let Some(first_md) = md_ids_only.first().cloned() {
+            // NOTE: here we discard the Vec<>  from `build_header`!
+            let md_ids_only: Vec<_> = md_children
+                .iter()
+                .copied()
+                .map(|ch| self.build_header(ch, visited_scopes, Some(cluster_id)).0)
+                .collect();
+
+            if let Some(first_md) = md_ids_only.first().copied() {
                 if !branch_exits.is_empty() {
                     for e in branch_exits.iter() {
                         self.graph.edges.push(Edge {
@@ -433,6 +433,8 @@ impl<'index> GraphBuilder<'index> {
         });
 
         // Merge markdown children and direct nested roots, preserving each list's internal order
+        // NOTE: this requires differentating `by_hid` & `graph` mut locks in order to avoid the
+        // collect().
         let items_merged: Vec<Hid> = self.merge_by_pos(&md_children, &nested_children);
 
         let mut first_rep: Option<_> = None;
@@ -574,6 +576,35 @@ impl std::fmt::Display for ClusterId {
         write!(f, "sg{}", self.0)
     }
 }
+
+fn build_scope_roots(index: &HeaderIndex) -> HashMap<ScopeId, Hid> {
+    // iterate the headers by scope order. The first one to appear is the scope root.
+    let mut scope_root = HashMap::new();
+    for h in &index.headers {
+        scope_root.entry(h.scope).or_insert(h.hid);
+    }
+    scope_root
+}
+
+fn all_nested_targets<'iter>(
+    index: &'iter HeaderIndex,
+    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
+) -> impl Iterator<Item = Hid> + 'iter {
+    nested_scope_edges(index, by_hid).map(|(_, c)| c)
+}
+
+/// Edges that cross a scope enter, i.e not just header changes.
+fn nested_scope_edges<'iter>(
+    index: &'iter HeaderIndex,
+    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
+) -> impl Iterator<Item = (Hid, Hid)> + 'iter {
+    index
+        .nested_edges_hid_iter()
+        .filter(|(p, c)| by_hid[p].scope != by_hid[c].scope)
+        .copied()
+}
+
+// TODO: separate to function
 
 struct MermaidRenderer;
 
@@ -728,31 +759,4 @@ impl MermaidRenderer {
 #[inline]
 fn escape_label(s: &str) -> String {
     s.replace('"', "&quot;")
-}
-
-fn build_scope_roots(index: &HeaderIndex) -> HashMap<ScopeId, Hid> {
-    // iterate the headers by scope order. The first one to appear is the scope root.
-    let mut scope_root = HashMap::new();
-    for h in &index.headers {
-        scope_root.entry(h.scope).or_insert(h.hid);
-    }
-    scope_root
-}
-
-fn all_nested_targets<'iter>(
-    index: &'iter HeaderIndex,
-    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
-) -> impl Iterator<Item = Hid> + 'iter {
-    nested_scope_edges(index, by_hid).map(|(_, c)| c)
-}
-
-/// Edges that cross a scope enter, i.e not just header changes.
-fn nested_scope_edges<'iter>(
-    index: &'iter HeaderIndex,
-    by_hid: &'iter HashMap<Hid, &'iter RenderableHeader>,
-) -> impl Iterator<Item = (Hid, Hid)> + 'iter {
-    index
-        .nested_edges_hid_iter()
-        .filter(|(p, c)| by_hid[p].scope != by_hid[c].scope)
-        .copied()
 }

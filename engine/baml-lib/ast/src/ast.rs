@@ -22,14 +22,14 @@ mod type_builder_block;
 mod type_expression_block;
 mod value_expression_block;
 
-pub mod baml_vis;
+mod baml_vis;
 pub mod header_collector;
 pub mod mermaid_debug;
 pub use app::App;
 pub use argument::{Argument, ArgumentId, ArgumentsList};
 pub use assignment::Assignment;
 pub use attribute::{Attribute, AttributeContainer, AttributeId};
-pub use baml_vis::BamlVisDiagramGenerator;
+pub use baml_vis::diagram_generator;
 pub use config::ConfigBlockProperty;
 pub use expr::{ExprFn, TopLevelAssignment};
 pub use expression::{

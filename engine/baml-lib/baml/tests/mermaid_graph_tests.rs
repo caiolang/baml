@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use baml_lib::{
-    internal_baml_ast::{ast::BamlVisDiagramGenerator, parse},
+    internal_baml_ast::{ast::diagram_generator, parse},
     internal_baml_diagnostics::SourceFile,
 };
 
@@ -105,7 +105,7 @@ fn headers_mermaid_snapshots() {
                     }
                 } else {
                     // No errors: compare Mermaid graph
-                    let got = BamlVisDiagramGenerator::generate_headers_flowchart(&ast);
+                    let got = diagram_generator::generate_headers_flowchart(&ast);
                     let mut exp_path = path.clone();
                     exp_path.set_extension("mmd");
                     if std::env::var("UPDATE").ok().as_deref() == Some("1") {
