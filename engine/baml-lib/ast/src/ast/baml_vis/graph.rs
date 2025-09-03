@@ -238,7 +238,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
     }
 
     // NOTE: we may wont to make the caches have more lifetime
-    // than build so that we can return &'cache [NodeId] after restoring.
+    // than build so that we can return &'cache [NodeId] after writing.
     fn build_header(
         &mut self,
         hid: Hid,
@@ -254,8 +254,12 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             return (entry, exits);
         }
         let header = self.by_hid[&hid];
-        let md_children = self.md_children.get(&hid).cloned().unwrap_or_default();
-        let nested_children = self.nested_children.get(&hid).cloned().unwrap_or_default();
+        let md_children = self.md_children.get(&hid).map(Vec::as_slice).unwrap_or(&[]);
+        let nested_children = self
+            .nested_children
+            .get(&hid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let has_md = !md_children.is_empty();
         let has_nested = !nested_children.is_empty();
         let is_branching = header.label_kind == HeaderLabelKind::If;
@@ -305,15 +309,14 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                 cluster: parent_cluster,
             });
             self.header_entry.insert(hid, node_id);
-            let mut exits = vec![node_id];
-            if md_children.len() == 1 {
+            let exits = if md_children.len() == 1 {
                 let (c_entry, c_exits) =
                     self.build_header(md_children[0], visited_scopes, parent_cluster);
                 self.graph.edges.push(Edge {
                     from: node_id,
                     to: c_entry,
                 });
-                exits = c_exits;
+                c_exits
             } else if nested_children.len() == 1 {
                 let child_root_hid = nested_children[0];
                 let child_scope = self.by_hid[&child_root_hid].scope;
@@ -324,9 +327,9 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                     from: node_id,
                     to: c_entry,
                 });
-                exits = c_exits;
-            }
-            self.header_exits.insert(hid, exits.clone());
+                c_exits
+            };
+            self.header_exits.insert(hid, exits);
             return (node_id, exits);
         }
 
@@ -412,11 +415,11 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         });
 
         // Merge markdown children and direct nested roots, preserving each list's internal order
-        let items_merged = merge_by_pos(&self.by_hid, &md_children, &nested_children);
+        let items_merged = merge_by_pos(self.by_hid, &md_children, &nested_children);
 
         let mut first_rep: Option<_> = None;
         let mut prev_exits: Option<_> = None;
-        for child_hid in items_merged.into_iter() {
+        for child_hid in items_merged {
             // If this child is a direct nested root for the current container, prebuild its scope
             // inside this container's cluster and use the scope's final exits.
             let mut prebuilt_scope_last_exits = None;
@@ -477,7 +480,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
     ) {
         if let Some(callees) = self.index.header_calls.get(&hid) {
             for callee in callees {
-                // TODO: get rid of `callee.clone()`
                 if let Some(&cached_id) = self.call_node_cache.get(&(hid, callee)) {
                     self.graph.edges.push(Edge {
                         from: cached_id,
