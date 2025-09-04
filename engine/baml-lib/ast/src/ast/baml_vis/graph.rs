@@ -229,15 +229,23 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             .map(|h| h.hid)
             .collect();
 
-        let mut prev_exits = None;
-        for hid in items {
-            let (entry, exits) = self.build_header(hid, visited_scopes, parent_cluster);
-            if let Some(prev) = prev_exits.take() {
-                for e in prev {
-                    self.graph.edges.push(Edge { from: e, to: entry });
-                }
-            }
-            prev_exits = Some(exits);
+        // post-order: build headers inside scope. <- parent_cluster
+        for &hid in &items {
+            self.build_header(hid, visited_scopes, parent_cluster);
+        }
+
+        // unordered: add edges from scope <- header_entry, header_exits
+        for (hid, prev_hid) in items[1..].iter().zip(&items) {
+            let entry = self.header_entry[hid];
+            let prev_exits = &self.header_exits[prev_hid];
+            // NOTE: `extend` on a loop. TL;DR: each exits vec is pretty small.
+            // More thorough explanation at the end of `build_header`.
+            self.graph.edges.extend(
+                prev_exits
+                    .iter()
+                    .copied()
+                    .map(|e| Edge { from: e, to: entry }),
+            );
         }
     }
 
@@ -251,19 +259,14 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         // TODO: understand  why this exists!
         visited_scopes: &mut HashSet<ScopeId>,
         parent_cluster: Option<ClusterId>,
-    ) -> (NodeId, Vec<NodeId>) {
+    ) {
         // NOTE:
         // - `build_scope_sequence` is only called for `nested_children`, which we also have a
         // HashSet of.
 
         // TODO: there should be no cache hit since there are no cycles!
-        if let Some(entry) = self.header_entry.get(&hid).copied() {
-            let exits = self
-                .header_exits
-                .get(&hid)
-                .cloned()
-                .unwrap_or_else(|| vec![entry]);
-            return (entry, exits);
+        if self.header_entry.contains_key(&hid) {
+            return;
         }
         let header = self.by_hid[&hid];
         let md_children = self.md_children.get(&hid).map(Vec::as_slice).unwrap_or(&[]);
@@ -285,10 +288,13 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             });
             self.header_entry.insert(hid, node_id);
             self.header_exits.insert(hid, vec![node_id]);
+
+            // unordered: render
+
             if self.cfg.show_call_nodes {
                 self.render_calls_for_header(hid, node_id, parent_cluster);
             }
-            return (node_id, vec![node_id]);
+            return;
         }
 
         if header.label_kind == HeaderLabelKind::If {
@@ -390,7 +396,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                 branch_exits
             };
             self.header_exits.insert(hid, outward.clone());
-            return (decision_id, outward);
+            return;
         }
 
         let single_nested_child_has_multiple_items = nested_children.len() == 1 && {
@@ -467,8 +473,8 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                 vec![node_id]
             };
 
-            self.header_exits.insert(hid, exits.clone());
-            return (node_id, exits);
+            self.header_exits.insert(hid, exits);
+            return;
         }
 
         // pre-order: assign cluster id cluster_id <- header, parent_cluster
@@ -504,7 +510,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         // Left scan for choosing exits, although choosing fn is not expensive so it can be
         // executed twice.
 
-        let mut choose_exits_hid = |child_hid| {
+        let choose_exits_hid = |child_hid| {
             // NOTE: since nested children Hids are marked, can we use pre?
             let prebuilt_scope_last_exits = if nested_children.contains(&child_hid) {
                 let child_scope = self.by_hid[&child_hid].scope;
@@ -551,8 +557,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         let entry = first_rep;
         self.header_entry.insert(hid, entry);
         let exits = self.header_exits[&prev_exits_hid].to_owned();
-        self.header_exits.insert(hid, exits.clone());
-        (entry, exits)
+        self.header_exits.insert(hid, exits);
     }
 
     /// If header is in [`HeaderIndex::header_calls`], inserts & links a call node to the
