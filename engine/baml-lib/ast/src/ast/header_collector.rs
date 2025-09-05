@@ -14,6 +14,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use baml_types::BamlMap;
 use internal_baml_diagnostics::Span;
 
 use super::{Ast, Expression, ExpressionBlock, Field, Header, Stmt, Top, WithName, WithSpan};
@@ -70,8 +71,10 @@ pub struct RenderableHeader {
 pub struct HeaderIndex {
     /// All headers in source order per scope, flattened
     pub headers: Vec<RenderableHeader>,
-    // header indexes in source order per scope
-    by_scope: HashMap<ScopeId, Vec<usize>>,
+
+    /// Header indexes in source order per scope.
+    /// Since it uses `BamlMap` it will maintain source order in snapshot testing.
+    by_scope: BamlMap<ScopeId, Vec<usize>>,
     /// Mapping of internal Hid -> names of functions called by the labeled expression
     pub header_calls: HashMap<Hid, Vec<String>>, // hid -> [callee_name]
     hid_to_idx: Vec<usize>,
@@ -91,6 +94,12 @@ impl HeaderIndex {
             .flat_map(|idxs| idxs.iter().map(|i| &self.headers[*i]))
     }
 
+    /// Iterates all scopes. Under snapshot testing, order is guaranteed to be
+    /// consistent with source order.
+    pub fn scopes<'iter>(&'iter self) -> impl Iterator<Item = ScopeId> + 'iter {
+        self.by_scope.keys().copied()
+    }
+
     /// O(1) access to a header by its Hid via internal index
     pub fn get_by_hid(&self, hid: Hid) -> Option<&RenderableHeader> {
         let idx = *self.hid_to_idx.get(hid.0 as usize)?;
@@ -107,12 +116,13 @@ impl HeaderIndex {
 }
 
 /// Internal collector to walk AST and build a HeaderIndex
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct HeaderCollector {
     scope_counter: u32,
     scope_stack: Vec<ScopeId>,
-    // Raw headers by scope before normalization and in-scope parenting
-    raw_by_scope: HashMap<ScopeId, Vec<RawHeader>>, // source order
+    /// Raw headers by scope before normalization and in-scope parenting.
+    /// Will maintain source order under snapshot testing.
+    raw_by_scope: BamlMap<ScopeId, Vec<RawHeader>>, // source order
     // Accumulated nested edges (Hid -> Hid)
     nested_edges_hid: Vec<(Hid, Hid)>,
     // Mapping during collection: header (by Hid) -> function names called by the labeled expression
@@ -134,15 +144,7 @@ struct RawHeader {
 
 impl HeaderCollector {
     pub fn collect(ast: &Ast) -> HeaderIndex {
-        let mut c = Self {
-            scope_counter: 0,
-            scope_stack: Vec::new(),
-            raw_by_scope: HashMap::new(),
-            nested_edges_hid: Vec::new(),
-            header_fn_calls: HashMap::new(),
-            next_hid: 0,
-            last_hdr_stack: Vec::new(),
-        };
+        let mut c = Self::default();
         c.visit_ast(ast);
         c.build_index()
     }
@@ -464,7 +466,7 @@ impl HeaderCollector {
     fn build_index(self) -> HeaderIndex {
         let mut index = HeaderIndex {
             headers: Vec::new(),
-            by_scope: HashMap::new(),
+            by_scope: BamlMap::new(),
             header_calls: HashMap::new(),
             hid_to_idx: Vec::new(),
             nested_edges_hid: Vec::new(),

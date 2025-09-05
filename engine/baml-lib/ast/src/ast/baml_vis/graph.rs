@@ -224,11 +224,45 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             self.build_scope_sequence(scope, None);
         }
 
+        self.add_scope_edges();
+
         if self.cfg.show_call_nodes {
             self.add_header_calls();
         }
 
         (self.graph, self.span_map)
+    }
+
+    /// Links the items in each scope in source order, showing execution order.
+    fn add_scope_edges(&mut self) {
+        for scope in self.index.scopes() {
+            // TODO: I think we can remove collect()?
+            let mut items = self
+                .index
+                .headers_in_scope_iter(scope)
+                .filter(|h| !self.has_md_parent.contains(&h.hid))
+                .map(|h| h.hid);
+
+            let Some(first) = items.next() else {
+                continue;
+            };
+
+            let prev_pairs =
+                items.scan(first, |prev, cur| Some((cur, std::mem::replace(prev, cur))));
+
+            for (hid, prev_hid) in prev_pairs {
+                let entry = self.header_entry[&hid];
+                let prev_exits = &self.header_exits[&prev_hid];
+                // NOTE: `extend` on a loop. TL;DR: each exits vec is pretty small.
+                // More thorough explanation at the end of `build_header`.
+                self.graph.edges.extend(
+                    prev_exits
+                        .iter()
+                        .copied()
+                        .map(|e| Edge { from: e, to: entry }),
+                );
+            }
+        }
     }
 
     fn build_scope_sequence(&mut self, scope: ScopeId, parent_cluster: Option<ClusterId>) {
@@ -242,20 +276,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         // post-order: build headers inside scope. <- parent_cluster
         for &hid in &items {
             self.build_header(hid, parent_cluster);
-        }
-
-        // unordered: add edges from scope <- header_entry, header_exits
-        for (hid, prev_hid) in items[1..].iter().zip(&items) {
-            let entry = self.header_entry[hid];
-            let prev_exits = &self.header_exits[prev_hid];
-            // NOTE: `extend` on a loop. TL;DR: each exits vec is pretty small.
-            // More thorough explanation at the end of `build_header`.
-            self.graph.edges.extend(
-                prev_exits
-                    .iter()
-                    .copied()
-                    .map(|e| Edge { from: e, to: entry }),
-            );
         }
     }
 
