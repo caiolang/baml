@@ -14,10 +14,12 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use baml_types::BamlMap;
+use indexmap::IndexMap;
 use internal_baml_diagnostics::Span;
 
-use super::{Ast, Expression, ExpressionBlock, Field, Header, Stmt, Top, WithName, WithSpan};
+use crate::ast::{
+    Ast, ClassConstructorField, Expression, ExpressionBlock, Field, Header, Stmt, Top,
+};
 
 /// Alias for external header identifiers for public consumption
 type HeaderId = String;
@@ -29,16 +31,6 @@ pub struct Hid(pub u32);
 /// A simple numeric identifier for a logical header scope (any block: function, for-loop body, expr block, etc.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub u32);
-
-/// Classification of scope kinds for visualization semantics
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ScopeKind {
-    TopLevel,
-    ForBody,
-    IfThen,
-    IfElse,
-    Generic,
-}
 
 /// Classification of what kind of statement a header labels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,8 +65,10 @@ pub struct HeaderIndex {
     pub headers: Vec<RenderableHeader>,
 
     /// Header indexes in source order per scope.
-    /// Since it uses `BamlMap` it will maintain source order in snapshot testing.
-    by_scope: BamlMap<ScopeId, Vec<usize>>,
+    /// Uses [`IndexMap`] instead of BamlMap to always guarantee iteration order = insertion order
+    /// = source order.
+    /// See [`graph`](crate::ast::baml_vis::graph) module, where we add
+    by_scope: IndexMap<ScopeId, Vec<usize>>,
     /// Mapping of internal Hid -> names of functions called by the labeled expression
     pub header_calls: HashMap<Hid, Vec<String>>, // hid -> [callee_name]
     hid_to_idx: Vec<usize>,
@@ -94,7 +88,7 @@ impl HeaderIndex {
             .flat_map(|idxs| idxs.iter().map(|i| &self.headers[*i]))
     }
 
-    /// Iterates all scopes. Under snapshot testing, order is guaranteed to be
+    /// Iterates all scopes. Order of iteration is guaranteed to be
     /// consistent with source order.
     pub fn scopes<'iter>(&'iter self) -> impl Iterator<Item = ScopeId> + 'iter {
         self.by_scope.keys().copied()
@@ -121,8 +115,8 @@ pub struct HeaderCollector {
     scope_counter: u32,
     scope_stack: Vec<ScopeId>,
     /// Raw headers by scope before normalization and in-scope parenting.
-    /// Will maintain source order under snapshot testing.
-    raw_by_scope: BamlMap<ScopeId, Vec<RawHeader>>, // source order
+    /// [`IndexMap`] to maintain source order.
+    raw_by_scope: IndexMap<ScopeId, Vec<RawHeader>>, // source order
     // Accumulated nested edges (Hid -> Hid)
     nested_edges_hid: Vec<(Hid, Hid)>,
     // Mapping during collection: header (by Hid) -> function names called by the labeled expression
@@ -353,8 +347,8 @@ impl HeaderCollector {
             Expression::ClassConstructor(cons, _) => {
                 for f in &cons.fields {
                     match f {
-                        super::ClassConstructorField::Named(_, e) => self.visit_expression(e),
-                        super::ClassConstructorField::Spread(e) => self.visit_expression(e),
+                        ClassConstructorField::Named(_, e) => self.visit_expression(e),
+                        ClassConstructorField::Spread(e) => self.visit_expression(e),
                     }
                 }
             }
@@ -466,7 +460,7 @@ impl HeaderCollector {
     fn build_index(self) -> HeaderIndex {
         let mut index = HeaderIndex {
             headers: Vec::new(),
-            by_scope: BamlMap::new(),
+            by_scope: IndexMap::new(),
             header_calls: HashMap::new(),
             hid_to_idx: Vec::new(),
             nested_edges_hid: Vec::new(),
@@ -545,6 +539,7 @@ impl HeaderCollector {
 /// Only captures the outermost call(s) that structurally represent the expression,
 /// ignoring nested calls within arguments or sub-expressions.
 fn collect_top_level_calls(expr: &Expression) -> Vec<String> {
+    use crate::ast::WithName;
     match expr {
         // If the expression is a block, the top-level expression is inside it
         Expression::ExprBlock(block, _span) => {

@@ -7,10 +7,7 @@ use std::{
 use baml_types::BamlMap;
 use internal_baml_diagnostics::SerializedSpan;
 
-use crate::ast::{
-    header_collector::{HeaderLabelKind, Hid},
-    HeaderIndex, RenderableHeader, ScopeId,
-};
+use super::header_collector::{HeaderIndex, HeaderLabelKind, Hid, RenderableHeader, ScopeId};
 
 /// Config: maximum number of direct children (markdown + nested) a non-branching
 /// container may have to be flattened into a linear sequence instead of a subgraph.

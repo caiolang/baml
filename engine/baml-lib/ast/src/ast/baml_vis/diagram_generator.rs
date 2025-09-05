@@ -12,11 +12,15 @@ use internal_baml_diagnostics::SerializedSpan;
 
 use crate::ast::{
     baml_vis::{
-        graph::{self, BuilderConfig, Cluster, ClusterId, Direction, Graph, Node, NodeId, NodeKind},
+        graph::{
+            self, BuilderConfig, Cluster, ClusterId, Direction, Graph, Node, NodeId, NodeKind,
+        },
         SHOW_CALL_NODES,
     },
-    Ast, HeaderCollector,
+    Ast,
 };
+
+use super::header_collector::HeaderCollector;
 
 /// Generate a Mermaid flowchart (LR) showing headers as linear steps and
 /// nested scopes as subgraphs.
@@ -64,17 +68,11 @@ fn render_mermaid_graph(
 
     let mut children_by_parent: BamlMap<_, Vec<_>> = BamlMap::new();
     for c in &graph.clusters {
-        children_by_parent
-            .entry(c.parent)
-            .or_default()
-            .push(c);
+        children_by_parent.entry(c.parent).or_default().push(c);
     }
     let mut nodes_by_cluster: BamlMap<_, Vec<_>> = BamlMap::new();
     for n in &graph.nodes {
-        nodes_by_cluster
-            .entry(n.cluster)
-            .or_default()
-            .push(n);
+        nodes_by_cluster.entry(n.cluster).or_default().push(n);
     }
 
     fn emit<'index>(

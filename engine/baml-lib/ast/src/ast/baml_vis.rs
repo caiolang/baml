@@ -1,4 +1,7 @@
+pub mod diagram_generator;
 mod graph;
+mod header_collector;
+pub(super) mod mermaid_debug;
 
 use std::collections::{HashMap, HashSet};
 
@@ -9,10 +12,3 @@ use baml_types::BamlMap;
 use graph::{Cluster, ClusterId, Direction, Graph, Node, NodeId, NodeKind};
 use internal_baml_diagnostics::SerializedSpan;
 use serde_json;
-
-use super::{
-    header_collector::{HeaderLabelKind, Hid},
-    Ast, HeaderCollector, HeaderIndex, RenderableHeader, ScopeId,
-};
-
-pub mod diagram_generator;

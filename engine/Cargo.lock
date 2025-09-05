@@ -3766,6 +3766,7 @@ dependencies = [
  "baml-types",
  "bstd",
  "either",
+ "indexmap 2.9.0",
  "internal-baml-diagnostics",
  "log",
  "pest",
