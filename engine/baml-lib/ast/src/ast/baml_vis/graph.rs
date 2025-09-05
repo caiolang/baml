@@ -117,7 +117,6 @@ struct GraphBuilder<'index, 'pre> {
     header_exits: HashMap<Hid, Vec<NodeId>>,
     // we're going to need stable iteration in snapshot tests.
     span_map: BamlMap<NodeId, SerializedSpan>,
-    call_node_cache: HashMap<(Hid, &'index str), NodeId>,
 }
 
 // NOTE: this could be part of HeaderIndex
@@ -194,7 +193,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             header_entry: HashMap::new(),
             header_exits: HashMap::new(),
             span_map: BamlMap::new(),
-            call_node_cache: HashMap::new(),
         }
     }
 
@@ -225,7 +223,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         }
 
         if self.cfg.show_call_nodes {
-            self.render_calls_for_headers();
+            self.add_header_calls();
         }
 
         (self.graph, self.span_map)
@@ -543,10 +541,9 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         self.header_exits.insert(hid, exits);
     }
 
-    // TODO: move `call_node_cache` here
-    /// Traverses the headers that have an assigned node id, & for each inserts & links a call node
+    /// Visits the headers that have an assigned node id, & for each inserts & links a call node
     /// if the header is in [`HeaderIndex::header_calls`]
-    fn render_calls_for_headers(&mut self) {
+    fn add_header_calls(&mut self) {
         let entries_with_calls = self.header_entry.iter().filter_map(|(hid, rep_id)| {
             self.index
                 .header_calls
@@ -557,27 +554,19 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         for (hid, rep_id, callees) in entries_with_calls {
             let cluster = self.graph.nodes[rep_id.0 as usize].cluster;
             for callee in callees {
-                if let Some(&cached_id) = self.call_node_cache.get(&(hid, callee)) {
-                    self.graph.edges.push(Edge {
-                        from: cached_id,
-                        to: rep_id,
-                    });
-                } else {
-                    let call_node_id = self.graph.add_node(|call_node_id| Node {
-                        id: call_node_id,
-                        label: callee.as_str(),
-                        kind: NodeKind::Call {
-                            header: hid,
-                            callee,
-                        },
-                        cluster,
-                    });
-                    self.graph.edges.push(Edge {
-                        from: call_node_id,
-                        to: rep_id,
-                    });
-                    self.call_node_cache.insert((hid, callee), call_node_id);
-                }
+                let call_node_id = self.graph.add_node(|call_node_id| Node {
+                    id: call_node_id,
+                    label: callee.as_str(),
+                    kind: NodeKind::Call {
+                        header: hid,
+                        callee,
+                    },
+                    cluster,
+                });
+                self.graph.edges.push(Edge {
+                    from: call_node_id,
+                    to: rep_id,
+                });
             }
         }
     }
