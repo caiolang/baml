@@ -196,28 +196,14 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
     }
 
     pub fn build(mut self) -> (Graph<'index>, BamlMap<NodeId, SerializedSpan>) {
-        let mut tops: Vec<(String, usize, usize, ScopeId)> = Vec::new();
-        let mut seen_scopes: HashSet<ScopeId> = HashSet::new();
-
         let scope_root = build_scope_roots(self.index);
 
-        for h in &self.index.headers {
-            if seen_scopes.insert(h.scope) {
-                let root_hid = scope_root[&h.scope];
-                if !self.nested_targets.contains(&root_hid) {
-                    let root = self.by_hid[&root_hid];
-                    tops.push((
-                        root.span.file.path_buf().to_string_lossy().into_owned(),
-                        root.span.start,
-                        root.span.end,
-                        h.scope,
-                    ));
-                }
-            }
-        }
-        tops.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let top_scopes = self.index.scopes().filter(|scope| {
+            let root_hid = &scope_root[scope];
+            !self.nested_targets.contains(&root_hid)
+        });
 
-        for (_, _, _, scope) in tops {
+        for scope in top_scopes {
             self.build_scope_sequence(scope, None);
         }
 
