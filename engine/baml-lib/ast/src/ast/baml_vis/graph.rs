@@ -79,10 +79,16 @@ impl<'index> Graph<'index> {
     // Only reason we use a builder function is because `Nodes` store their own id.
     // Since we grab `&mut self` anyway & don't give it to the function, it won't be able to
     // add more nodes to the tree before it has inserted this one.
-    pub fn add_node(&mut self, make_node: impl FnOnce(NodeId) -> Node<'index>) -> NodeId {
+    pub fn add_node(&mut self, make: impl FnOnce(NodeId) -> Node<'index>) -> NodeId {
         let node_id = NodeId(self.nodes.len() as u32);
-        self.nodes.push(make_node(node_id));
+        self.nodes.push(make(node_id));
         node_id
+    }
+
+    pub fn add_cluster(&mut self, make: impl FnOnce(ClusterId) -> Cluster<'index>) -> ClusterId {
+        let id = ClusterId(self.clusters.len() as u32);
+        self.clusters.push(make(id));
+        id
     }
 }
 
@@ -103,8 +109,6 @@ struct GraphBuilder<'index, 'pre> {
     index: &'index HeaderIndex,
     cfg: BuilderConfig,
     graph: Graph<'index>,
-    next_node: u32,
-    next_cluster: u32,
     // TODO: add Prelude ref directly.
     by_hid: &'pre HashMap<Hid, &'index RenderableHeader>,
     md_children: &'pre HashMap<Hid, Vec<Hid>>,
@@ -183,8 +187,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             index,
             cfg,
             graph: Graph::default(),
-            next_node: 0,
-            next_cluster: 0,
             by_hid: &pre.by_hid,
             md_children: &pre.md_children,
             has_md_parent: &pre.has_md_parent,
@@ -257,10 +259,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         }
     }
 
-    // NOTE: we may wont to make the caches have more lifetime
-    // than build so that we can return &'cache [NodeId] after writing.
-    // TODO: in process of changing signature so that it does not return anything & we just get
-    // from the built cache.
     fn build_header(&mut self, hid: Hid, parent_cluster: Option<ClusterId>) {
         // NOTE:
         // - `build_scope_sequence` is only called for `nested_children`, which we also have a
@@ -280,15 +278,14 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             .unwrap_or(&[]);
 
         if md_children.is_empty() && nested_children.is_empty() {
-            let node_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(node_id, span.clone());
-            self.graph.nodes.push(Node {
+            let node_id = self.graph.add_node(|node_id| Node {
                 id: node_id,
                 label: header.title.as_ref(),
-                kind: NodeKind::Header(hid, Some(span)),
+                kind: NodeKind::Header(hid, Some(span.clone())),
                 cluster: parent_cluster,
             });
+            self.span_map.insert(node_id, span);
             self.header_entry.insert(hid, node_id);
             self.header_exits.insert(hid, vec![node_id]);
 
@@ -300,23 +297,21 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             // <pre/post>-order: <name> [[output] <- <dependency list>]
 
             // pre-order: assign cluster ids: cluster_id <- header, parent_cluster
-            let cluster_id = self.new_cluster_id();
-            self.graph.clusters.push(Cluster {
+            let cluster_id = self.graph.add_cluster(|cluster_id| Cluster {
                 id: cluster_id,
                 label: header.title.as_ref(),
                 parent: parent_cluster,
             });
 
             // pre-order: insert entry <- header, cluster_id
-            let decision_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(decision_id, span.clone());
-            self.graph.nodes.push(Node {
+            let decision_id = self.graph.add_node(|decision_id| Node {
                 id: decision_id,
                 label: header.title.as_ref(),
-                kind: NodeKind::Decision(hid, Some(span)),
+                kind: NodeKind::Decision(hid, Some(span.clone())),
                 cluster: Some(cluster_id),
             });
+            self.span_map.insert(decision_id, span);
             self.header_entry.insert(hid, decision_id);
 
             // post-order: build scope sequence for scope & build header
@@ -395,16 +390,15 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
         if should_flatten {
             // pre-order add & assign node id to header
-            let node_id = self.new_node_id();
             let span = SerializedSpan::serialize(&header.span);
-            self.span_map.insert(node_id, span.clone());
-            self.graph.nodes.push(Node {
+            let node_id = self.graph.add_node(|node_id| Node {
                 id: node_id,
                 label: header.title.as_ref(),
                 kind: NodeKind::Header(hid, Some(span.clone())),
                 cluster: parent_cluster,
             });
 
+            self.span_map.insert(node_id, span.clone());
             self.header_entry.insert(hid, node_id);
 
             // TODO: classify child & what to do inside flattened, like scope sequence needed or
@@ -458,8 +452,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
         // pre-order: assign cluster id cluster_id <- header, parent_cluster
 
-        let cluster_id = self.new_cluster_id();
-        self.graph.clusters.push(Cluster {
+        let cluster_id = self.graph.add_cluster(|cluster_id| Cluster {
             id: cluster_id,
             label: header.title.as_ref(),
             // TODO: clone() on copy
@@ -569,20 +562,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                 });
             }
         }
-    }
-
-    // TODO: use graph.add_node()
-    fn new_node_id(&mut self) -> NodeId {
-        let id = NodeId(self.next_node);
-        self.next_node += 1;
-        id
-    }
-
-    // TODO: use graph.add_cluster()
-    fn new_cluster_id(&mut self) -> ClusterId {
-        let id = ClusterId(self.next_cluster);
-        self.next_cluster += 1;
-        id
     }
 }
 
