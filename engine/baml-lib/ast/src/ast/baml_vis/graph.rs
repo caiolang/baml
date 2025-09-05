@@ -264,11 +264,12 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         // - `build_scope_sequence` is only called for `nested_children`, which we also have a
         // HashSet of.
 
-        // TODO: there should be no cache hit since there are no cycles!
-        if self.header_entry.contains_key(&hid) {
-            return;
-        }
         let header = self.by_hid[&hid];
+
+        assert!(
+            !self.header_entry.contains_key(&hid),
+            "header graph is a tree - no cycles!"
+        );
         let md_children = self.md_children.get(&hid).map(Vec::as_slice).unwrap_or(&[]);
         let nested_children = self
             .nested_children
@@ -333,7 +334,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             for child_root_id in nested_children {
                 let child_scope = self.by_hid[child_root_id].scope;
                 self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
-                self.build_header(*child_root_id, visited_scopes, Some(cluster_id));
             }
 
             // post-order: build header for each of the markdown children <- cluster_id.
@@ -432,18 +432,16 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
             // post-order: build scope sequence for child scope, only when flatten is single child.
             // This may be implicit if the child is marked as visited.
-            if md_children.len() != 1 && nested_children.len() == 1 {
-                let child_root_hid = nested_children[0];
-                let child_scope = self.by_hid[&child_root_hid].scope;
-                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster);
-            }
 
             // post-order: run children headers
             if md_children.len() == 1 {
                 self.build_header(md_children[0], visited_scopes, parent_cluster);
             } else if nested_children.len() == 1 {
                 let child_root_hid = nested_children[0];
-                self.build_header(child_root_hid, visited_scopes, parent_cluster);
+                let child_scope = self.by_hid[&child_root_hid].scope;
+                // build_scope_sequence already calls build_header for the entries inside the
+                // scope, including the child_root_hid
+                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster);
             }
 
             // unordered: add edges <- node_id, children id
@@ -487,21 +485,23 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             parent: parent_cluster,
         });
 
-        // pre-order: build scope sequence <- cluster_id, visited_scopes. Only for direct nested
+        // post-order: build scope sequence <- cluster_id, visited_scopes. Only for direct nested
         // children.
         for child_hid in nested_children {
             let child_scope = self.by_hid[&child_hid].scope;
             self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
         }
 
+        // post-order: build header for markdown children (scope sequence in nested already visits nested
+        // children)
+        // <- cluster_id
+        for &child_hid in md_children {
+            self.build_header(child_hid, visited_scopes, Some(cluster_id));
+        }
+
         // Merge markdown children and direct nested roots, preserving each list's internal order
         let items_merged: Vec<_> =
             merge_by_pos(self.by_hid, &md_children, &nested_children).collect();
-
-        // pre-order: build header for all children. <- cluster_id
-        for &child_hid in &items_merged {
-            self.build_header(child_hid, visited_scopes, Some(cluster_id));
-        }
 
         // We should have at least one item, since empty children are handled separately.
         let first_rep = self.header_entry[&items_merged[0]];

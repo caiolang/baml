@@ -279,7 +279,7 @@ impl HeaderCollector {
             self.header_fn_calls
                 .entry(*hid)
                 .or_default()
-                .extend(top_calls.clone());
+                .extend(top_calls.iter().cloned());
         }
     }
 
