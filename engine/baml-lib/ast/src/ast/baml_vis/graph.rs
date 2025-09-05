@@ -206,22 +206,13 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         }
         tops.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
-        let mut visited_scopes: HashSet<ScopeId> = HashSet::new();
         for (_, _, _, scope) in tops {
-            self.build_scope_sequence(scope, &mut visited_scopes, None);
+            self.build_scope_sequence(scope, None);
         }
         (self.graph, self.span_map)
     }
 
-    fn build_scope_sequence(
-        &mut self,
-        scope: ScopeId,
-        visited_scopes: &mut HashSet<ScopeId>,
-        parent_cluster: Option<ClusterId>,
-    ) {
-        if !visited_scopes.insert(scope) {
-            return;
-        }
+    fn build_scope_sequence(&mut self, scope: ScopeId, parent_cluster: Option<ClusterId>) {
         let items: Vec<Hid> = self
             .index
             .headers_in_scope_iter(scope)
@@ -231,7 +222,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
         // post-order: build headers inside scope. <- parent_cluster
         for &hid in &items {
-            self.build_header(hid, visited_scopes, parent_cluster);
+            self.build_header(hid, parent_cluster);
         }
 
         // unordered: add edges from scope <- header_entry, header_exits
@@ -253,13 +244,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
     // than build so that we can return &'cache [NodeId] after writing.
     // TODO: in process of changing signature so that it does not return anything & we just get
     // from the built cache.
-    fn build_header(
-        &mut self,
-        hid: Hid,
-        // TODO: understand  why this exists!
-        visited_scopes: &mut HashSet<ScopeId>,
-        parent_cluster: Option<ClusterId>,
-    ) {
+    fn build_header(&mut self, hid: Hid, parent_cluster: Option<ClusterId>) {
         // NOTE:
         // - `build_scope_sequence` is only called for `nested_children`, which we also have a
         // HashSet of.
@@ -333,13 +318,13 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             // For some reason it can't work without a visited_scopes? That's pre-order data.
             for child_root_id in nested_children {
                 let child_scope = self.by_hid[child_root_id].scope;
-                self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
+                self.build_scope_sequence(child_scope, Some(cluster_id));
             }
 
             // post-order: build header for each of the markdown children <- cluster_id.
             // Same doubt wrt visited_scopes.
             for child in md_children {
-                self.build_header(*child, visited_scopes, Some(cluster_id));
+                self.build_header(*child, Some(cluster_id));
             }
 
             // unordered: add edges from decision id to children <- decision_id
@@ -435,13 +420,13 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
             // post-order: run children headers
             if md_children.len() == 1 {
-                self.build_header(md_children[0], visited_scopes, parent_cluster);
+                self.build_header(md_children[0], parent_cluster);
             } else if nested_children.len() == 1 {
                 let child_root_hid = nested_children[0];
                 let child_scope = self.by_hid[&child_root_hid].scope;
                 // build_scope_sequence already calls build_header for the entries inside the
                 // scope, including the child_root_hid
-                self.build_scope_sequence(child_scope, visited_scopes, parent_cluster);
+                self.build_scope_sequence(child_scope, parent_cluster);
             }
 
             // unordered: add edges <- node_id, children id
@@ -463,6 +448,7 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
 
             // post-order: copy exits from children.
             // NOTE: we could reference them, but the vecs are pretty small.
+            // TODO: If each tree node only has one preceding parent, we can extract them (move) instead.
             let exits = if md_children.len() == 1 {
                 self.header_exits[&md_children[0]].to_owned()
             } else if nested_children.len() == 1 {
@@ -489,14 +475,14 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         // children.
         for child_hid in nested_children {
             let child_scope = self.by_hid[&child_hid].scope;
-            self.build_scope_sequence(child_scope, visited_scopes, Some(cluster_id));
+            self.build_scope_sequence(child_scope, Some(cluster_id));
         }
 
         // post-order: build header for markdown children (scope sequence in nested already visits nested
         // children)
         // <- cluster_id
         for &child_hid in md_children {
-            self.build_header(child_hid, visited_scopes, Some(cluster_id));
+            self.build_header(child_hid, Some(cluster_id));
         }
 
         // Merge markdown children and direct nested roots, preserving each list's internal order
