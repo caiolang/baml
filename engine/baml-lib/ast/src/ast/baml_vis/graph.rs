@@ -73,6 +73,19 @@ pub struct Graph<'index> {
     pub clusters: Vec<Cluster<'index>>,
 }
 
+impl<'index> Graph<'index> {
+    // NOTE: since the graph is currently a tree, there should be no need for having the node id
+    // before constructing it.
+    // Only reason we use a builder function is because `Nodes` store their own id.
+    // Since we grab `&mut self` anyway & don't give it to the function, it won't be able to
+    // add more nodes to the tree before it has inserted this one.
+    pub fn add_node(&mut self, make_node: impl FnOnce(NodeId) -> Node<'index>) -> NodeId {
+        let node_id = NodeId(self.nodes.len() as u32);
+        self.nodes.push(make_node(node_id));
+        node_id
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BuilderConfig {
     show_call_nodes: bool,
@@ -107,6 +120,7 @@ struct GraphBuilder<'index, 'pre> {
     call_node_cache: HashMap<(Hid, &'index str), NodeId>,
 }
 
+// NOTE: this could be part of HeaderIndex
 /// Cached, precomuted data used by graph builder.
 struct Prelude<'index> {
     // NOTE: this could be a Box<[&'index RenderableHeader]>. Doesn't matter much.
@@ -209,6 +223,11 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         for (_, _, _, scope) in tops {
             self.build_scope_sequence(scope, None);
         }
+
+        if self.cfg.show_call_nodes {
+            self.render_calls_for_headers();
+        }
+
         (self.graph, self.span_map)
     }
 
@@ -275,11 +294,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             self.header_entry.insert(hid, node_id);
             self.header_exits.insert(hid, vec![node_id]);
 
-            // unordered: render
-
-            if self.cfg.show_call_nodes {
-                self.render_calls_for_header(hid, node_id, parent_cluster);
-            }
             return;
         }
 
@@ -307,12 +321,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             });
             self.header_entry.insert(hid, decision_id);
 
-            // unordered: render_calls_for_header <- header_entry, cluster_id
-
-            if self.cfg.show_call_nodes {
-                self.render_calls_for_header(hid, decision_id, Some(cluster_id));
-            }
-
             // post-order: build scope sequence for scope & build header
             // header_entry, header_exit <- cluster_id.
             // For some reason it can't work without a visited_scopes? That's pre-order data.
@@ -334,17 +342,6 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
                     from: decision_id,
                     to: self.header_entry[child_root_id],
                 }));
-
-            // unordered: render_calls_for_header <- header_entry, cluster_id
-            if self.cfg.show_call_nodes {
-                for child_root_hid in nested_children {
-                    self.render_calls_for_header(
-                        *child_root_hid,
-                        self.header_entry[child_root_hid],
-                        Some(cluster_id),
-                    );
-                }
-            }
 
             // post-order: collect branch exits <- header_exits
             let branch_exits: Vec<_> = nested_children
@@ -546,47 +543,53 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         self.header_exits.insert(hid, exits);
     }
 
-    /// If header is in [`HeaderIndex::header_calls`], inserts & links a call node to the
-    /// given header node.
-    fn render_calls_for_header(
-        &mut self,
-        hid: Hid,
-        header_rep_id: NodeId,
-        cluster: Option<ClusterId>,
-    ) {
-        if let Some(callees) = self.index.header_calls.get(&hid) {
+    // TODO: move `call_node_cache` here
+    /// Traverses the headers that have an assigned node id, & for each inserts & links a call node
+    /// if the header is in [`HeaderIndex::header_calls`]
+    fn render_calls_for_headers(&mut self) {
+        let entries_with_calls = self.header_entry.iter().filter_map(|(hid, rep_id)| {
+            self.index
+                .header_calls
+                .get(hid)
+                .map(|callees| (*hid, *rep_id, callees))
+        });
+
+        for (hid, rep_id, callees) in entries_with_calls {
+            let cluster = self.graph.nodes[rep_id.0 as usize].cluster;
             for callee in callees {
                 if let Some(&cached_id) = self.call_node_cache.get(&(hid, callee)) {
                     self.graph.edges.push(Edge {
                         from: cached_id,
-                        to: header_rep_id,
+                        to: rep_id,
                     });
-                    continue;
+                } else {
+                    let call_node_id = self.graph.add_node(|call_node_id| Node {
+                        id: call_node_id,
+                        label: callee.as_str(),
+                        kind: NodeKind::Call {
+                            header: hid,
+                            callee,
+                        },
+                        cluster,
+                    });
+                    self.graph.edges.push(Edge {
+                        from: call_node_id,
+                        to: rep_id,
+                    });
+                    self.call_node_cache.insert((hid, callee), call_node_id);
                 }
-                let call_node_id = self.new_node_id();
-                self.graph.nodes.push(Node {
-                    id: call_node_id,
-                    label: callee.as_str(),
-                    kind: NodeKind::Call {
-                        header: hid,
-                        callee,
-                    },
-                    cluster,
-                });
-                self.graph.edges.push(Edge {
-                    from: call_node_id,
-                    to: header_rep_id,
-                });
-                self.call_node_cache.insert((hid, callee), call_node_id);
             }
         }
     }
 
+    // TODO: use graph.add_node()
     fn new_node_id(&mut self) -> NodeId {
         let id = NodeId(self.next_node);
         self.next_node += 1;
         id
     }
+
+    // TODO: use graph.add_cluster()
     fn new_cluster_id(&mut self) -> ClusterId {
         let id = ClusterId(self.next_cluster);
         self.next_cluster += 1;
