@@ -5,6 +5,7 @@ use std::{
 };
 
 use baml_types::BamlMap;
+use indexmap::IndexMap;
 use internal_baml_diagnostics::SerializedSpan;
 
 use super::header_collector::{HeaderIndex, HeaderLabelKind, Hid, RenderableHeader, ScopeId};
@@ -203,8 +204,13 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             !self.nested_targets.contains(&root_hid)
         });
 
+        let filtered_headers = self.classify_and_filter_headers();
+
+        dbg!(&self.index.headers);
+        dbg!(&filtered_headers);
+
         for scope in top_scopes {
-            self.build_scope_sequence(scope, None);
+            self.build_scope_sequence(scope, None, &filtered_headers.actions);
         }
 
         self.add_scope_edges();
@@ -214,6 +220,154 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         }
 
         (self.graph, self.span_map)
+    }
+
+    /// Returns an iterator of (child, parent) pairs, relating each component of the scope to the
+    /// previous in the list. First component is related to `parent_hid`.
+    fn link_scope_children<'iter>(
+        &'iter self,
+        scope: ScopeId,
+        parent_hid: Hid,
+    ) -> impl Iterator<Item = (Hid, Hid)> + 'iter {
+        let mut non_md_headers = self
+            .index
+            .headers_in_scope_iter(scope)
+            .map(|h| h.hid)
+            .filter(|hid| !self.has_md_parent.contains(hid));
+
+        let first = non_md_headers.next();
+
+        first
+            .map(move |first| {
+                // we relate each subsequent header to the previous one in its scope
+                let paired_rest = non_md_headers.scan(first, |prev, next| {
+                    Some((next, std::mem::replace(prev, next)))
+                });
+
+                [(first, parent_hid)].into_iter().chain(paired_rest)
+            })
+            .into_iter()
+            .flatten()
+    }
+
+    // NOTE: right now, algorithm switches between visiting scopes & visiting headers because
+    // headers are not linked to their parent headers via scopes.
+
+    /// Returns a map of actions to take on filtered headers. Iterating the map will result ina
+    /// pre-order traversal on the headers.
+    fn classify_and_filter_headers(&self) -> FilteredHeaders {
+        let mut actions = IndexMap::new();
+
+        // for non-root & non-filtered nodes, their parent.
+        let mut parent = HashMap::new();
+
+        let classify_nonfiltered = |header: &RenderableHeader, parent: &mut HashMap<Hid, Hid>| {
+            let mut add_all_children = || {
+                let md_children = self
+                    .md_children
+                    .get(&header.hid)
+                    .into_iter()
+                    .flatten()
+                    .copied();
+                let nested_children = self
+                    .nested_children
+                    .get(&header.hid)
+                    .into_iter()
+                    .flatten()
+                    .copied();
+                let parent_hid = header.hid;
+                let md_children = md_children.map(|child| (child, parent_hid));
+
+                let scope_entries = nested_children.flat_map(|child| {
+                    let scope = self.by_hid[&child].scope;
+
+                    self.link_scope_children(scope, parent_hid)
+                });
+
+                parent.extend(md_children.chain(scope_entries));
+            };
+
+            // If any of the children lists is Some(), then it is nonempty. So unwrap_or(&[]) does
+            // not remove information.
+
+            let md_children = self
+                .md_children
+                .get(&header.hid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let nested_children = self
+                .nested_children
+                .get(&header.hid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            dbg!(md_children, nested_children);
+
+            if matches!((md_children, nested_children), ([], [])) {
+                HeaderAction::Empty
+            } else if header.label_kind == HeaderLabelKind::If {
+                // mark children as visited.
+                add_all_children();
+                HeaderAction::If
+            } else {
+                let single_nested_child_has_multiple_items = nested_children.len() == 1 && {
+                    let child_root = self.by_hid[&nested_children[0]];
+                    let count = self.index.headers_in_scope_iter(child_root.scope).count();
+                    count > 1
+                };
+
+                let total_children = md_children.len() + nested_children.len();
+
+                let should_flatten = total_children <= MAX_CHILDREN_TO_FLATTEN
+                    && !single_nested_child_has_multiple_items;
+
+                if should_flatten {
+                    // implicitly make filtered removed by not adding a parent to them
+
+                    if md_children.len() == 1 {
+                        parent.insert(md_children[0], header.hid);
+                    } else if nested_children.len() == 1 {
+                        let scope = self.by_hid[&nested_children[0]].scope;
+                        parent.extend(self.link_scope_children(scope, header.hid));
+                    }
+
+                    HeaderAction::Flattened
+                } else {
+                    add_all_children();
+                    HeaderAction::Nonempty
+                }
+            }
+        };
+
+        // forward action classification & filtering.
+
+        for root in self.index.headers.iter().filter(|h| h.parent_id.is_none()) {
+            actions.insert(root.hid, classify_nonfiltered(root, &mut parent));
+        }
+
+        for header in &self.index.headers {
+            // no parent => filtered.
+            let Some(parent_id) = parent.get(&header.hid).copied() else {
+                continue;
+            };
+
+            // to allow for scope sequences within filtered context, if a visited header is the first of its scope, the entire scope is
+            // marked as visited.
+
+            let mut scope_iter = self.index.headers_in_scope_iter(header.scope);
+
+            let is_first_of_scope = scope_iter
+                .next()
+                .is_some_and(|first| first.hid == header.hid);
+
+            if is_first_of_scope {
+                parent.extend(scope_iter.map(|header| (header.hid, parent_id)));
+            }
+
+            actions.insert(header.hid, classify_nonfiltered(header, &mut parent));
+        }
+
+        FilteredHeaders { actions, parent }
     }
 
     /// Links the items in each scope in source order, showing execution order.
@@ -248,24 +402,32 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
         }
     }
 
-    fn build_scope_sequence(&mut self, scope: ScopeId, parent_cluster: Option<ClusterId>) {
-        let items: Vec<Hid> = self
+    fn build_scope_sequence(
+        &mut self,
+        scope: ScopeId,
+        parent_cluster: Option<ClusterId>,
+        filtered: &IndexMap<Hid, HeaderAction>,
+    ) {
+        let items = self
             .index
             .headers_in_scope_iter(scope)
             .filter(|h| !self.has_md_parent.contains(&h.hid))
-            .map(|h| h.hid)
-            .collect();
+            .map(|h| h.hid);
 
         // post-order: build headers inside scope. <- parent_cluster
-        for &hid in &items {
-            self.build_header(hid, parent_cluster);
+        for hid in items {
+            self.build_header(hid, parent_cluster, filtered);
         }
     }
 
-    fn build_header(&mut self, hid: Hid, parent_cluster: Option<ClusterId>) {
-        // NOTE:
-        // - `build_scope_sequence` is only called for `nested_children`, which we also have a
-        // HashSet of.
+    fn build_header(
+        &mut self,
+        hid: Hid,
+        parent_cluster: Option<ClusterId>,
+        filtered: &IndexMap<Hid, HeaderAction>,
+    ) {
+        // pre-order/post-order notation:
+        // <pre/post>-order: <name> [[output] <- <dependency list>]
 
         let header = self.by_hid[&hid];
 
@@ -280,261 +442,242 @@ impl<'index, 'pre> GraphBuilder<'index, 'pre> {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
 
-        if md_children.is_empty() && nested_children.is_empty() {
-            let span = SerializedSpan::serialize(&header.span);
-            let node_id = self.graph.add_node(|node_id| Node {
-                id: node_id,
-                label: header.title.as_ref(),
-                kind: NodeKind::Header(hid, Some(span.clone())),
-                cluster: parent_cluster,
-            });
-            self.span_map.insert(node_id, span);
-            self.header_entry.insert(hid, node_id);
-            self.header_exits.insert(hid, vec![node_id]);
-
-            return;
-        }
-
-        if header.label_kind == HeaderLabelKind::If {
-            // pre-order/post-order notation:
-            // <pre/post>-order: <name> [[output] <- <dependency list>]
-
-            // pre-order: assign cluster ids: cluster_id <- header, parent_cluster
-            let cluster_id = self.graph.add_cluster(|cluster_id| Cluster {
-                id: cluster_id,
-                label: header.title.as_ref(),
-                parent: parent_cluster,
-            });
-
-            // pre-order: insert entry <- header, cluster_id
-            let span = SerializedSpan::serialize(&header.span);
-            let decision_id = self.graph.add_node(|decision_id| Node {
-                id: decision_id,
-                label: header.title.as_ref(),
-                kind: NodeKind::Decision(hid, Some(span.clone())),
-                cluster: Some(cluster_id),
-            });
-            self.span_map.insert(decision_id, span);
-            self.header_entry.insert(hid, decision_id);
-
-            // post-order: build scope sequence for scope & build header
-            // header_entry, header_exit <- cluster_id.
-            // For some reason it can't work without a visited_scopes? That's pre-order data.
-            for child_root_id in nested_children {
-                let child_scope = self.by_hid[child_root_id].scope;
-                self.build_scope_sequence(child_scope, Some(cluster_id));
+        match filtered[&hid] {
+            HeaderAction::Empty => {
+                let span = SerializedSpan::serialize(&header.span);
+                let node_id = self.graph.add_node(|node_id| Node {
+                    id: node_id,
+                    label: header.title.as_ref(),
+                    kind: NodeKind::Header(hid, Some(span.clone())),
+                    cluster: parent_cluster,
+                });
+                self.span_map.insert(node_id, span);
+                self.header_entry.insert(hid, node_id);
+                self.header_exits.insert(hid, vec![node_id]);
             }
+            HeaderAction::If => {
+                // pre-order: assign cluster ids: cluster_id <- header, parent_cluster
+                let cluster_id = self.graph.add_cluster(|cluster_id| Cluster {
+                    id: cluster_id,
+                    label: header.title.as_ref(),
+                    parent: parent_cluster,
+                });
 
-            // post-order: build header for each of the markdown children <- cluster_id.
-            // Same doubt wrt visited_scopes.
-            for child in md_children {
-                self.build_header(*child, Some(cluster_id));
-            }
+                // pre-order: insert entry <- header, cluster_id
+                let span = SerializedSpan::serialize(&header.span);
+                let decision_id = self.graph.add_node(|decision_id| Node {
+                    id: decision_id,
+                    label: header.title.as_ref(),
+                    kind: NodeKind::Decision(hid, Some(span.clone())),
+                    cluster: Some(cluster_id),
+                });
+                self.span_map.insert(decision_id, span);
+                self.header_entry.insert(hid, decision_id);
 
-            // unordered: add edges from decision id to children <- decision_id
-            self.graph
-                .edges
-                .extend(nested_children.iter().map(|child_root_id| Edge {
-                    from: decision_id,
-                    to: self.header_entry[child_root_id],
-                }));
+                // post-order: build scope sequence for scope & build header
+                // header_entry, header_exit <- cluster_id.
+                // For some reason it can't work without a visited_scopes? That's pre-order data.
+                for child_root_id in nested_children {
+                    let child_scope = self.by_hid[child_root_id].scope;
+                    self.build_scope_sequence(child_scope, Some(cluster_id), filtered);
+                }
 
-            // post-order: collect branch exits <- header_exits
-            let branch_exits: Vec<_> = nested_children
-                .iter()
-                .flat_map(|child_hid| &self.header_exits[child_hid])
-                .copied()
-                .collect();
+                // post-order: build header for each of the markdown children <- cluster_id.
+                // Same doubt wrt visited_scopes.
+                for child in md_children {
+                    self.build_header(*child, Some(cluster_id), filtered);
+                }
 
-            let md_ids_only: Vec<_> = md_children.iter().map(|ch| self.header_entry[ch]).collect();
+                // unordered: add edges from decision id to children <- decision_id
+                self.graph
+                    .edges
+                    .extend(nested_children.iter().map(|child_root_id| Edge {
+                        from: decision_id,
+                        to: self.header_entry[child_root_id],
+                    }));
 
-            if let Some(first_md) = md_ids_only.first().copied() {
-                if !branch_exits.is_empty() {
-                    for e in branch_exits.iter() {
+                // post-order: collect branch exits <- header_exits
+                let branch_exits: Vec<_> = nested_children
+                    .iter()
+                    .flat_map(|child_hid| &self.header_exits[child_hid])
+                    .copied()
+                    .collect();
+
+                let md_ids_only: Vec<_> =
+                    md_children.iter().map(|ch| self.header_entry[ch]).collect();
+
+                if let Some(first_md) = md_ids_only.first().copied() {
+                    if !branch_exits.is_empty() {
+                        for e in branch_exits.iter() {
+                            self.graph.edges.push(Edge {
+                                from: *e,
+                                to: first_md,
+                            });
+                        }
+                    } else {
                         self.graph.edges.push(Edge {
-                            from: *e,
+                            from: decision_id,
                             to: first_md,
                         });
                     }
+                }
+                self.graph.edges.extend(md_ids_only.windows(2).map(|win| {
+                    let from = win[0];
+                    let to = win[1];
+                    Edge { from, to }
+                }));
+                let outward = if let Some(last) = md_ids_only.last().copied() {
+                    vec![last]
                 } else {
+                    branch_exits
+                };
+                self.header_exits.insert(hid, outward.clone());
+            }
+            HeaderAction::Nonempty => {
+                // pre-order: assign cluster id cluster_id <- header, parent_cluster
+
+                let cluster_id = self.graph.add_cluster(|cluster_id| Cluster {
+                    id: cluster_id,
+                    label: header.title.as_ref(),
+                    // TODO: clone() on copy
+                    parent: parent_cluster,
+                });
+
+                // post-order: build scope sequence <- cluster_id, visited_scopes. Only for direct nested
+                // children.
+                for child_hid in nested_children {
+                    let child_scope = self.by_hid[&child_hid].scope;
+                    self.build_scope_sequence(child_scope, Some(cluster_id), filtered);
+                }
+
+                // post-order: build header for markdown children (scope sequence in nested already visits nested
+                // children)
+                // <- cluster_id
+                for &child_hid in md_children {
+                    self.build_header(child_hid, Some(cluster_id), filtered);
+                }
+
+                // Merge markdown children and direct nested roots, preserving each list's internal order
+                let items_merged: Vec<_> =
+                    merge_by_pos(self.by_hid, &md_children, &nested_children).collect();
+
+                // We should have at least one item, since empty children are handled separately.
+                let first_rep = self.header_entry[&items_merged[0]];
+
+                // unordered: create edges <- header_exits.
+                // Left scan for choosing exits, although choosing fn is not expensive so it can be
+                // executed twice.
+
+                let choose_exits_hid = |child_hid| {
+                    // NOTE: since nested children Hids are marked, can we use pre?
+                    let prebuilt_scope_last_exits = if nested_children.contains(&child_hid) {
+                        let child_scope = self.by_hid[&child_hid].scope;
+                        let maybe_last_in_scope = self
+                            .index
+                            .headers_in_scope_iter(child_scope)
+                            .rev()
+                            .map(|h| h.hid)
+                            .find(|h| !self.has_md_parent.contains(h));
+
+                        maybe_last_in_scope.filter(|l| self.header_exits.contains_key(l))
+                    } else {
+                        None
+                    };
+
+                    prebuilt_scope_last_exits.unwrap_or(child_hid)
+                };
+
+                // NOTE: using Hid instead of direct reference since otherwise we lock writes to
+                // `self.header_exits`. We know that invalidating the reference that we hold is not possible
+                // but we cannot communicate this to Rust.
+                let mut prev_exits_hid = choose_exits_hid(items_merged[0]);
+
+                for &child_hid in &items_merged[1..] {
+                    let entry = self.header_entry[&child_hid];
+
+                    let exits_hid = choose_exits_hid(child_hid);
+                    let prev = std::mem::replace(&mut prev_exits_hid, exits_hid);
+
+                    // NOTE: using `extend` in a loop. Since most nodes will only have 1 or 2 children,
+                    // impact is covered by exponential allocation.
+                    //
+                    // The full iterator is `FlatMap`, it doesn't implement `ExactSizedIterator`
+                    // and doesn't have a reliable size_hint, so the perf fix here is to precalculate
+                    // the total exit count with a .iter().map().sum().
+                    let edges_prev = self.header_exits[&prev].iter().copied().map(|exit| Edge {
+                        from: exit,
+                        to: entry,
+                    });
+
+                    self.graph.edges.extend(edges_prev);
+                }
+
+                let entry = first_rep;
+                self.header_entry.insert(hid, entry);
+                let exits = self.header_exits[&prev_exits_hid].to_owned();
+                self.header_exits.insert(hid, exits);
+            }
+            HeaderAction::Flattened => {
+                // pre-order add & assign node id to header
+                let span = SerializedSpan::serialize(&header.span);
+                let node_id = self.graph.add_node(|node_id| Node {
+                    id: node_id,
+                    label: header.title.as_ref(),
+                    kind: NodeKind::Header(hid, Some(span.clone())),
+                    cluster: parent_cluster,
+                });
+
+                self.span_map.insert(node_id, span.clone());
+                self.header_entry.insert(hid, node_id);
+
+                // TODO: classify child & what to do inside flattened, like scope sequence needed or
+                // not.
+
+                // post-order: build scope sequence for child scope, only when flatten is single child.
+                // This may be implicit if the child is marked as visited.
+
+                // post-order: run children headers
+                if md_children.len() == 1 {
+                    self.build_header(md_children[0], parent_cluster, filtered);
+                } else if nested_children.len() == 1 {
+                    let child_root_hid = nested_children[0];
+                    let child_scope = self.by_hid[&child_root_hid].scope;
+                    // build_scope_sequence already calls build_header for the entries inside the
+                    // scope, including the child_root_hid
+                    self.build_scope_sequence(child_scope, parent_cluster, filtered);
+                }
+
+                // unordered: add edges <- node_id, children id
+
+                if md_children.len() == 1 {
+                    let c_entry = self.header_entry[&md_children[0]];
+
                     self.graph.edges.push(Edge {
-                        from: decision_id,
-                        to: first_md,
+                        from: node_id,
+                        to: c_entry,
+                    });
+                } else if nested_children.len() == 1 {
+                    let c_entry = self.header_entry[&nested_children[0]];
+                    self.graph.edges.push(Edge {
+                        from: node_id,
+                        to: c_entry,
                     });
                 }
+
+                // post-order: copy exits from children.
+                // NOTE: we could reference them, but the vecs are pretty small.
+                // TODO: If each tree node only has one preceding parent, we can extract them (move) instead.
+                let exits = if md_children.len() == 1 {
+                    self.header_exits[&md_children[0]].to_owned()
+                } else if nested_children.len() == 1 {
+                    self.header_exits[&nested_children[0]].to_owned()
+                } else {
+                    vec![node_id]
+                };
+
+                self.header_exits.insert(hid, exits);
             }
-            self.graph.edges.extend(md_ids_only.windows(2).map(|win| {
-                let from = win[0];
-                let to = win[1];
-                Edge { from, to }
-            }));
-            let outward = if let Some(last) = md_ids_only.last().copied() {
-                vec![last]
-            } else {
-                branch_exits
-            };
-            self.header_exits.insert(hid, outward.clone());
-            return;
         }
-
-        let single_nested_child_has_multiple_items = nested_children.len() == 1 && {
-            let child_root = self.by_hid[&nested_children[0]];
-            let count = self.index.headers_in_scope_iter(child_root.scope).count();
-            count > 1
-        };
-
-        let total_children = md_children.len() + nested_children.len();
-
-        // pre-order: handle whether a node should be flattened.
-        // -> will discard all of children array (md / nested) if len() != 1.
-        // That also means not visiting any of the children.
-        let should_flatten =
-            total_children <= MAX_CHILDREN_TO_FLATTEN && !single_nested_child_has_multiple_items;
-
-        if should_flatten {
-            // pre-order add & assign node id to header
-            let span = SerializedSpan::serialize(&header.span);
-            let node_id = self.graph.add_node(|node_id| Node {
-                id: node_id,
-                label: header.title.as_ref(),
-                kind: NodeKind::Header(hid, Some(span.clone())),
-                cluster: parent_cluster,
-            });
-
-            self.span_map.insert(node_id, span.clone());
-            self.header_entry.insert(hid, node_id);
-
-            // TODO: classify child & what to do inside flattened, like scope sequence needed or
-            // not.
-
-            // post-order: build scope sequence for child scope, only when flatten is single child.
-            // This may be implicit if the child is marked as visited.
-
-            // post-order: run children headers
-            if md_children.len() == 1 {
-                self.build_header(md_children[0], parent_cluster);
-            } else if nested_children.len() == 1 {
-                let child_root_hid = nested_children[0];
-                let child_scope = self.by_hid[&child_root_hid].scope;
-                // build_scope_sequence already calls build_header for the entries inside the
-                // scope, including the child_root_hid
-                self.build_scope_sequence(child_scope, parent_cluster);
-            }
-
-            // unordered: add edges <- node_id, children id
-
-            if md_children.len() == 1 {
-                let c_entry = self.header_entry[&md_children[0]];
-
-                self.graph.edges.push(Edge {
-                    from: node_id,
-                    to: c_entry,
-                });
-            } else if nested_children.len() == 1 {
-                let c_entry = self.header_entry[&nested_children[0]];
-                self.graph.edges.push(Edge {
-                    from: node_id,
-                    to: c_entry,
-                });
-            }
-
-            // post-order: copy exits from children.
-            // NOTE: we could reference them, but the vecs are pretty small.
-            // TODO: If each tree node only has one preceding parent, we can extract them (move) instead.
-            let exits = if md_children.len() == 1 {
-                self.header_exits[&md_children[0]].to_owned()
-            } else if nested_children.len() == 1 {
-                self.header_exits[&nested_children[0]].to_owned()
-            } else {
-                vec![node_id]
-            };
-
-            self.header_exits.insert(hid, exits);
-            return;
-        }
-
-        // pre-order: assign cluster id cluster_id <- header, parent_cluster
-
-        let cluster_id = self.graph.add_cluster(|cluster_id| Cluster {
-            id: cluster_id,
-            label: header.title.as_ref(),
-            // TODO: clone() on copy
-            parent: parent_cluster,
-        });
-
-        // post-order: build scope sequence <- cluster_id, visited_scopes. Only for direct nested
-        // children.
-        for child_hid in nested_children {
-            let child_scope = self.by_hid[&child_hid].scope;
-            self.build_scope_sequence(child_scope, Some(cluster_id));
-        }
-
-        // post-order: build header for markdown children (scope sequence in nested already visits nested
-        // children)
-        // <- cluster_id
-        for &child_hid in md_children {
-            self.build_header(child_hid, Some(cluster_id));
-        }
-
-        // Merge markdown children and direct nested roots, preserving each list's internal order
-        let items_merged: Vec<_> =
-            merge_by_pos(self.by_hid, &md_children, &nested_children).collect();
-
-        // We should have at least one item, since empty children are handled separately.
-        let first_rep = self.header_entry[&items_merged[0]];
-
-        // unordered: create edges <- header_exits.
-        // Left scan for choosing exits, although choosing fn is not expensive so it can be
-        // executed twice.
-
-        let choose_exits_hid = |child_hid| {
-            // NOTE: since nested children Hids are marked, can we use pre?
-            let prebuilt_scope_last_exits = if nested_children.contains(&child_hid) {
-                let child_scope = self.by_hid[&child_hid].scope;
-                let maybe_last_in_scope = self
-                    .index
-                    .headers_in_scope_iter(child_scope)
-                    .rev()
-                    .map(|h| h.hid)
-                    .find(|h| !self.has_md_parent.contains(h));
-
-                maybe_last_in_scope.filter(|l| self.header_exits.contains_key(l))
-            } else {
-                None
-            };
-
-            prebuilt_scope_last_exits.unwrap_or(child_hid)
-        };
-
-        // NOTE: using Hid instead of direct reference since otherwise we lock writes to
-        // `self.header_exits`. We know that invalidating the reference that we hold is not possible
-        // but we cannot communicate this to Rust.
-        let mut prev_exits_hid = choose_exits_hid(items_merged[0]);
-
-        for &child_hid in &items_merged[1..] {
-            let entry = self.header_entry[&child_hid];
-
-            let exits_hid = choose_exits_hid(child_hid);
-            let prev = std::mem::replace(&mut prev_exits_hid, exits_hid);
-
-            // NOTE: using `extend` in a loop. Since most nodes will only have 1 or 2 children,
-            // impact is covered by exponential allocation.
-            //
-            // The full iterator is `FlatMap`, it doesn't implement `ExactSizedIterator`
-            // and doesn't have a reliable size_hint, so the perf fix here is to precalculate
-            // the total exit count with a .iter().map().sum().
-            let edges_prev = self.header_exits[&prev].iter().copied().map(|exit| Edge {
-                from: exit,
-                to: entry,
-            });
-
-            self.graph.edges.extend(edges_prev);
-        }
-
-        let entry = first_rep;
-        self.header_entry.insert(hid, entry);
-        let exits = self.header_exits[&prev_exits_hid].to_owned();
-        self.header_exits.insert(hid, exits);
     }
 
     /// Visits the headers that have an assigned node id, & for each inserts & links a call node
@@ -691,4 +834,25 @@ where
             }
         }
     }
+}
+
+/// An internal action to take on a header. This is stored because there are both pre-order &
+/// post-order visits that need this information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderAction {
+    Empty,
+    Nonempty,
+    Flattened,
+    If,
+}
+
+#[derive(Debug)]
+struct FilteredHeaders {
+    /// Map of actions to take on filtered headers. Iterating the map will result ina
+    /// pre-order traversal on the headers.
+    actions: IndexMap<Hid, HeaderAction>,
+
+    #[allow(dead_code)] // FIXME: remove this
+    // Given a header, tracks its parent, even across scope boundaries.
+    parent: HashMap<Hid, Hid>,
 }
