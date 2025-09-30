@@ -1494,6 +1494,18 @@ class LlmResponseParser:
         result = self.__options.merge_options(baml_options).parse_response(function_name="SumFromTo", llm_response=llm_response, mode="request")
         return typing.cast(int, result)
 
+    def WorkflowEmit(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> int:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="WorkflowEmit", llm_response=llm_response, mode="request")
+        return typing.cast(int, result)
+
+    def WorkflowEmitChild(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> int:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="WorkflowEmitChild", llm_response=llm_response, mode="request")
+        return typing.cast(int, result)
+
     
 
 class LlmStreamParser:
@@ -2970,6 +2982,18 @@ class LlmStreamParser:
         self, llm_response: str, baml_options: BamlCallOptions = {},
     ) -> typing.Optional[int]:
         result = self.__options.merge_options(baml_options).parse_response(function_name="SumFromTo", llm_response=llm_response, mode="stream")
+        return typing.cast(typing.Optional[int], result)
+
+    def WorkflowEmit(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> typing.Optional[int]:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="WorkflowEmit", llm_response=llm_response, mode="stream")
+        return typing.cast(typing.Optional[int], result)
+
+    def WorkflowEmitChild(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> typing.Optional[int]:
+        result = self.__options.merge_options(baml_options).parse_response(function_name="WorkflowEmitChild", llm_response=llm_response, mode="stream")
         return typing.cast(typing.Optional[int], result)
 
     
